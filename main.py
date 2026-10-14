@@ -44,6 +44,11 @@ FRAME_INTERVAL = 0.115625  # seconds per scroll pixel
 ARRIVAL_PAUSE = 0.25
 ARRIVAL_SECONDS = 6
 
+# While Spotify is playing, album art takes the right half and the left half
+# alternates: clock for SPOTIFY_CLOCK_SECONDS, then one bus cycle
+SPOTIFY_CLOCK_SECONDS = 8
+SPOTIFY_POLL_SECONDS = 10
+
 # Configure the LED matrix
 options = RGBMatrixOptions()
 options.rows = 32
@@ -67,7 +72,9 @@ sunrise_time = None
 sunset_time = None
 spotify_access_token = ""
 spotify_token_expires_at = 0
-spotify_album_art = None
+spotify_album_art = None  # already resized to 32x32
+spotify_album_art_url = ""
+spotify_is_playing = False
 spotify_track_name = ""
 spotify_artist_name = ""
 
@@ -148,18 +155,18 @@ def get_bus_screen(count=3):
     return waits, arrivals, colors
 
 
-def draw_bus_waits(canvas, waits, colors, y_pos):
-    graphics.DrawText(canvas, wait_time_font, 34, 10, colors[0], waits[0])
-    graphics.DrawText(canvas, wait_time_font, 34, 20, colors[1], waits[1])
-    graphics.DrawText(canvas, wait_time_font, 34, 30, colors[2], waits[2])
+def draw_bus_waits(canvas, waits, colors, y_pos, x):
+    graphics.DrawText(canvas, wait_time_font, x + 2, 10, colors[0], waits[0])
+    graphics.DrawText(canvas, wait_time_font, x + 2, 20, colors[1], waits[1])
+    graphics.DrawText(canvas, wait_time_font, x + 2, 30, colors[2], waits[2])
     for i, letter in enumerate("BUS TRACKER"):
-        graphics.DrawText(canvas, wait_time_font, 56, 10 * (i + 1) + y_pos, bus_text_color, letter.strip())
+        graphics.DrawText(canvas, wait_time_font, x + 24, 10 * (i + 1) + y_pos, bus_text_color, letter.strip())
 
 
-def draw_bus_arrivals(canvas, arrivals, colors):
-    graphics.DrawText(canvas, arrival_time_font, 34, 9, colors[0], arrivals[0])
-    graphics.DrawText(canvas, arrival_time_font, 34, 19, colors[1], arrivals[1])
-    graphics.DrawText(canvas, arrival_time_font, 34, 29, colors[2], arrivals[2])
+def draw_bus_arrivals(canvas, arrivals, colors, x):
+    graphics.DrawText(canvas, arrival_time_font, x + 2, 9, colors[0], arrivals[0])
+    graphics.DrawText(canvas, arrival_time_font, x + 2, 19, colors[1], arrivals[1])
+    graphics.DrawText(canvas, arrival_time_font, x + 2, 29, colors[2], arrivals[2])
 
 
 SCROLL_END = LABEL_PAUSE + LABEL_SCROLL_PIXELS * FRAME_INTERVAL
@@ -167,16 +174,14 @@ ARRIVALS_START = SCROLL_END + ARRIVAL_PAUSE
 BUS_CYCLE_SECONDS = ARRIVALS_START + ARRIVAL_SECONDS
 
 
-def draw_bus_right(canvas, screen, elapsed):
-    # elapsed: seconds into the current bus cycle
+def draw_bus(canvas, screen, elapsed, x):
+    # elapsed: seconds into the current bus cycle; x: left edge of the half to draw in
     waits, arrivals, colors = screen
-    if not arrival_times:
-        return
     if elapsed < SCROLL_END:
         y_pos = -min(LABEL_SCROLL_PIXELS, max(0, int((elapsed - LABEL_PAUSE) / FRAME_INTERVAL)))
-        draw_bus_waits(canvas, waits, colors, y_pos)
+        draw_bus_waits(canvas, waits, colors, y_pos, x)
     elif elapsed >= ARRIVALS_START:
-        draw_bus_arrivals(canvas, arrivals, colors)
+        draw_bus_arrivals(canvas, arrivals, colors, x)
 
 
 def get_openmeteo_weather():
@@ -256,16 +261,26 @@ def get_spotify_access_token():
         return None
 
 
+def clear_spotify_now_playing():
+    global spotify_album_art, spotify_album_art_url, spotify_is_playing
+    global spotify_track_name, spotify_artist_name
+    spotify_is_playing = False
+    spotify_album_art = None
+    spotify_album_art_url = ""
+    spotify_track_name = ""
+    spotify_artist_name = ""
+
+
 def fetch_spotify_now_playing():
     global spotify_album_art
+    global spotify_album_art_url
+    global spotify_is_playing
     global spotify_track_name
     global spotify_artist_name
 
     token = get_spotify_access_token()
     if not token:
-        spotify_album_art = None
-        spotify_track_name = ""
-        spotify_artist_name = ""
+        clear_spotify_now_playing()
         return
 
     try:
@@ -275,10 +290,9 @@ def fetch_spotify_now_playing():
             timeout=10,
         )
 
+        # 204 = nothing playing
         if response.status_code == 204:
-            spotify_album_art = None
-            spotify_track_name = ""
-            spotify_artist_name = ""
+            clear_spotify_now_playing()
             return
 
         response.raise_for_status()
@@ -290,26 +304,27 @@ def fetch_spotify_now_playing():
         )
 
         images = item.get("album", {}).get("images", [])
-        if not images:
-            spotify_album_art = None
-            return
-
-        image_url = images[0].get("url")
+        image_url = images[0].get("url") if images else ""
         if not image_url:
             spotify_album_art = None
-            return
+            spotify_album_art_url = ""
+        elif image_url != spotify_album_art_url:
+            # Only download and resize when the album changes
+            image_response = requests.get(image_url, timeout=10)
+            image_response.raise_for_status()
+            image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
+            resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+            spotify_album_art = ImageOps.fit(image, (32, 32), method=resample)
+            spotify_album_art_url = image_url
 
-        image_response = requests.get(image_url, timeout=10)
-        image_response.raise_for_status()
-        image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
-        spotify_album_art = image
+        spotify_is_playing = bool(data.get("is_playing"))
     except Exception as e:
         print(f"Spotify playback error: {e}")
 
 
 def schedule_spotify_update():
     fetch_spotify_now_playing()
-    timer = threading.Timer(30.0, schedule_spotify_update)
+    timer = threading.Timer(SPOTIFY_POLL_SECONDS, schedule_spotify_update)
     timer.daemon = True
     timer.start()
 
@@ -554,16 +569,9 @@ def draw_blinking_clock(canvas):
     return draw_clock_left(canvas, False)
 
 
-def draw_spotify_art(canvas):
-    if spotify_album_art is None:
-        if spotify_track_name:
-            graphics.DrawText(canvas, wait_time_font, 34, 31, bus_text_color, spotify_track_name[:8])
-        return
+def draw_spotify_art(canvas, art):
+    canvas.SetImage(art, 32, 0)
 
-    size = 32
-    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-    art_square = ImageOps.fit(spotify_album_art, (size, size), method=resample)
-    canvas.SetImage(art_square.convert("RGB"), 32, 0)
 
 def draw_weather(canvas, is_day, is_animated):
     if weather_code in [300, 301, 302, 310, 311, 312, 313, 314, 321, 500, 501, 502, 503, 504, 511, 520, 521, 522, 531]:
@@ -591,20 +599,38 @@ schedule_weather_update()
 schedule_spotify_update()
 schedule_bus_update()
 
-bus_cycle_start = time.monotonic()
+cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
+has_buses = bool(arrival_times)
+showing_spotify = False
 
 try:
     while True:
-        elapsed = time.monotonic() - bus_cycle_start
-        if elapsed >= BUS_CYCLE_SECONDS:
-            bus_cycle_start = time.monotonic()
+        art = spotify_album_art
+        spotify_now = spotify_is_playing and art is not None
+        cycle_seconds = BUS_CYCLE_SECONDS + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
+
+        elapsed = time.monotonic() - cycle_start
+        if spotify_now != showing_spotify or elapsed >= cycle_seconds:
+            # Restart the cycle on a fresh snapshot (also when Spotify starts or stops)
+            showing_spotify = spotify_now
+            cycle_start = time.monotonic()
             bus_screen = get_bus_screen()
+            has_buses = bool(arrival_times)
             elapsed = 0
 
         offscreen_canvas.Clear()
-        draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
-        draw_bus_right(offscreen_canvas, bus_screen, elapsed)
+        if showing_spotify:
+            # Left half: clock, then the bus cycle; right half: album art
+            if elapsed < SPOTIFY_CLOCK_SECONDS or not has_buses:
+                draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
+            else:
+                draw_bus(offscreen_canvas, bus_screen, elapsed - SPOTIFY_CLOCK_SECONDS, 0)
+            draw_spotify_art(offscreen_canvas, art)
+        else:
+            draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
+            if has_buses:
+                draw_bus(offscreen_canvas, bus_screen, elapsed, 32)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
         time.sleep(FRAME_INTERVAL)
 
