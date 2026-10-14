@@ -8,6 +8,7 @@ from google.protobuf.message import Message
 from google.transit import gtfs_realtime_pb2
 import sys
 import os
+import signal
 import threading
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -36,12 +37,12 @@ WEATHER_LON = os.getenv("WEATHER_LON", "")
 
 BUS_DURATION_MULTIPLIER = 1
 
-# Wait-time color gradient (minutes): red at or below BUS_WAIT_RED, green at or above BUS_WAIT_GREEN
-BUS_WAIT_RED = 2
-BUS_WAIT_GREEN = 12
-
-# Arrival time shown under the wait is the bus's arrival plus this ride time
-BUS_RIDE_MINUTES = 5
+# Right-half bus cycle: wait times while "BUS TRACKER" scrolls, then arrival times
+LABEL_PAUSE = 0.5          # seconds the label holds still before scrolling
+LABEL_SCROLL_PIXELS = 80
+FRAME_INTERVAL = 0.115625  # seconds per scroll pixel
+ARRIVAL_PAUSE = 0.25
+ARRIVAL_SECONDS = 6
 
 # Configure the LED matrix
 options = RGBMatrixOptions()
@@ -54,6 +55,9 @@ options.gpio_slowdown = 2
 options.brightness = 75  # Adjust 1-100 (100 = full brightness)
 ## NECESSARY!!!!! VVVVV
 options.hardware_mapping = 'adafruit-hat'
+# Stay root after init: /home/pi isn't readable by the 'daemon' user the
+# library would drop to, which breaks lazy imports (e.g. urllib3's HTTP/1 backend)
+options.drop_privileges = False
 
 wait_times = []
 arrival_times = []
@@ -73,14 +77,10 @@ arrival_time_font = graphics.Font()
 arrival_time_font.LoadFont("/home/pi/bustracker/fonts/6x10.bdf")
 bus_number_font = graphics.Font()
 bus_number_font.LoadFont("/home/pi/bustracker/fonts/4x6.bdf")
-next_bus_wait_font = graphics.Font()
-next_bus_wait_font.LoadFont("/home/pi/bustracker/fonts/8x13B.bdf")
 date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
 bus_text_color = graphics.Color(214, 11, 180)
-next_bus_arrival_color = graphics.Color(255, 100, 255)
-no_bus_color = graphics.Color(255, 0, 0)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -102,8 +102,13 @@ def get_bus_times():
                 for update in entity.trip_update.stop_time_update:
                     if update.stop_id == STOP_ID:
                         timestamp = update.arrival.time or update.departure.time
-                        if timestamp:
-                            new_arrivals.append(datetime.fromtimestamp(timestamp))
+                        if not timestamp:
+                            continue
+                        arrival_time = datetime.fromtimestamp(timestamp)
+                        # skip buses that have already left
+                        if arrival_time < datetime.now() - timedelta(minutes=1):
+                            continue
+                        new_arrivals.append(arrival_time)
         # Swap in the whole list at once so the draw loop never sees a half-built list
         arrival_times = sorted(new_arrivals)
     except Exception as e:
@@ -119,40 +124,59 @@ def schedule_bus_update():
 
 
 def get_wait_color(minutes):
-    # Red when the bus is about to arrive, fading through yellow to green once there's plenty of time
-    if minutes <= BUS_WAIT_RED:
-        return graphics.Color(255, 0, 0)
-    if minutes >= BUS_WAIT_GREEN:
-        return graphics.Color(0, 255, 0)
-    mid = (BUS_WAIT_RED + BUS_WAIT_GREEN) / 2
-    if minutes <= mid:
-        g = int(255 * (minutes - BUS_WAIT_RED) / (mid - BUS_WAIT_RED))
-        return graphics.Color(255, g, 0)
-    r = int(255 * (BUS_WAIT_GREEN - minutes) / (BUS_WAIT_GREEN - mid))
-    return graphics.Color(r, 255, 0)
+    # Green for a bus that's about to come, shading to red as the wait gets longer
+    return graphics.Color(int(min(255, 5.67 * minutes)), int(max(0, 255 - (5.67 * minutes))), 0)
 
 
-def draw_centered_right(canvas, font, char_width, y, color, text):
-    # Center text within the right 32x32 half of the panel
-    x = 32 + max(0, (32 - len(text) * char_width) // 2)
-    graphics.DrawText(canvas, font, x, y, color, text)
+def get_bus_screen(count=3):
+    # Snapshot of the next buses: wait strings, arrival strings and colors, padded to `count`
+    now = datetime.now()
+    waits, arrivals, colors = [], [], []
+    for t in arrival_times[:count]:
+        minutes = (t - now).total_seconds() / 60
+        if minutes >= 1:
+            waits.append(f"{math.ceil(minutes)}m")
+            colors.append(get_wait_color(minutes))
+        else:
+            waits.append("Now")
+            colors.append(graphics.Color(255, 255, 255))
+        arrivals.append(t.strftime("%I:%M"))
+    while len(waits) < count:
+        waits.append("")
+        arrivals.append("")
+        colors.append(default_color)
+    return waits, arrivals, colors
 
 
-def draw_next_bus(canvas):
-    draw_centered_right(canvas, bus_number_font, 4, 6, default_color, "NEXT BUS")
+def draw_bus_waits(canvas, waits, colors, y_pos):
+    graphics.DrawText(canvas, wait_time_font, 34, 10, colors[0], waits[0])
+    graphics.DrawText(canvas, wait_time_font, 34, 20, colors[1], waits[1])
+    graphics.DrawText(canvas, wait_time_font, 34, 30, colors[2], waits[2])
+    for i, letter in enumerate("BUS TRACKER"):
+        graphics.DrawText(canvas, wait_time_font, 56, 10 * (i + 1) + y_pos, bus_text_color, letter.strip())
 
-    upcoming = [t for t in arrival_times if t >= datetime.now()]
-    if not upcoming:
-        draw_centered_right(canvas, next_bus_wait_font, 8, 20, no_bus_color, "NONE")
+
+def draw_bus_arrivals(canvas, arrivals, colors):
+    graphics.DrawText(canvas, arrival_time_font, 34, 9, colors[0], arrivals[0])
+    graphics.DrawText(canvas, arrival_time_font, 34, 19, colors[1], arrivals[1])
+    graphics.DrawText(canvas, arrival_time_font, 34, 29, colors[2], arrivals[2])
+
+
+SCROLL_END = LABEL_PAUSE + LABEL_SCROLL_PIXELS * FRAME_INTERVAL
+ARRIVALS_START = SCROLL_END + ARRIVAL_PAUSE
+BUS_CYCLE_SECONDS = ARRIVALS_START + ARRIVAL_SECONDS
+
+
+def draw_bus_right(canvas, screen, elapsed):
+    # elapsed: seconds into the current bus cycle
+    waits, arrivals, colors = screen
+    if not arrival_times:
         return
-
-    next_bus_time = upcoming[0]
-    wait_minutes = (next_bus_time - datetime.now()).total_seconds() / 60
-    wait_text = "now" if wait_minutes < 1 else f"{min(int(wait_minutes), 99)}m"
-    draw_centered_right(canvas, next_bus_wait_font, 8, 20, get_wait_color(wait_minutes), wait_text)
-
-    estimated_arrival = next_bus_time + timedelta(minutes=BUS_RIDE_MINUTES)
-    draw_centered_right(canvas, arrival_time_font, 6, 30, next_bus_arrival_color, estimated_arrival.strftime("%I:%M"))
+    if elapsed < SCROLL_END:
+        y_pos = -min(LABEL_SCROLL_PIXELS, max(0, int((elapsed - LABEL_PAUSE) / FRAME_INTERVAL)))
+        draw_bus_waits(canvas, waits, colors, y_pos)
+    elif elapsed >= ARRIVALS_START:
+        draw_bus_arrivals(canvas, arrivals, colors)
 
 
 def get_openmeteo_weather():
@@ -171,6 +195,7 @@ def get_openmeteo_weather():
         }
         
         response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
         data = response.json()
         print(data)
 
@@ -190,10 +215,7 @@ def get_openmeteo_weather():
         print(f"Weather API error: {e}")
         import traceback
         traceback.print_exc()
-        current_temperature = 0
-        weather_code = 0
-        sunrise_time = None
-        sunset_time = None
+        # Keep the last known weather on error
 
 def schedule_weather_update():
     get_openmeteo_weather()
@@ -358,18 +380,30 @@ def draw_cloud(canvas):
         canvas.SetPixel(x, 25, 220, 220, 220)
         canvas.SetPixel(x, 26, 220, 220, 220)
 
-def draw_rain(canvas, _is_animated=False):
+def draw_rain(canvas, is_animated):
     draw_cloud(canvas)
-    canvas.SetPixel(22, 28, 0, 0, 255)
-    canvas.SetPixel(26, 28, 0, 0, 255)
+    if is_animated:
+        canvas.SetPixel(22, 29, 0, 0, 255)
+        canvas.SetPixel(26, 29, 0, 0, 255)
 
-    canvas.SetPixel(22, 29, 0, 0, 255)
-    canvas.SetPixel(24, 29, 0, 0, 255)
-    canvas.SetPixel(26, 29, 0, 0, 255)
-    canvas.SetPixel(28, 29, 0, 0, 255)
+        canvas.SetPixel(22, 30, 0, 0, 255)
+        canvas.SetPixel(24, 30, 0, 0, 255)
+        canvas.SetPixel(26, 30, 0, 0, 255)
+        canvas.SetPixel(28, 30, 0, 0, 255)
 
-    canvas.SetPixel(24, 30, 0, 0, 255)
-    canvas.SetPixel(28, 30, 0, 0, 255)
+        canvas.SetPixel(24, 31, 0, 0, 255)
+        canvas.SetPixel(28, 31, 0, 0, 255)
+    else:
+        canvas.SetPixel(22, 28, 0, 0, 255)
+        canvas.SetPixel(26, 28, 0, 0, 255)
+
+        canvas.SetPixel(22, 29, 0, 0, 255)
+        canvas.SetPixel(24, 29, 0, 0, 255)
+        canvas.SetPixel(26, 29, 0, 0, 255)
+        canvas.SetPixel(28, 29, 0, 0, 255)
+
+        canvas.SetPixel(24, 30, 0, 0, 255)
+        canvas.SetPixel(28, 30, 0, 0, 255)
 
 def draw_partly_cloudy(canvas):
     draw_cloud(canvas)
@@ -395,20 +429,28 @@ def draw_partly_cloudy(canvas):
 
     canvas.SetPixel(29, 24, sun_color.red, sun_color.green, sun_color.blue)
 
-def draw_thunderstorm(canvas, _is_animated=False):
+def draw_thunderstorm(canvas, is_animated):
     draw_cloud(canvas)
-    canvas.SetPixel(24, 28, 255, 255, 0)
-    canvas.SetPixel(27, 28, 0, 0, 255)
+    if is_animated:
+        canvas.SetPixel(27, 29, 0, 0, 255)
 
-    canvas.SetPixel(22, 29, 0, 0, 255)
-    canvas.SetPixel(24, 29, 255, 255, 0)
-    canvas.SetPixel(25, 29, 255, 255, 0)
-    canvas.SetPixel(27, 29, 0, 0, 255)
+        canvas.SetPixel(22, 30, 0, 0, 255)
+        canvas.SetPixel(27, 30, 0, 0, 255)
 
-    canvas.SetPixel(22, 30, 0, 0, 255)
-    canvas.SetPixel(25, 30, 255, 255, 0)
+        canvas.SetPixel(22, 31, 0, 0, 255)
+    else:
+        canvas.SetPixel(24, 28, 255, 255, 0)
+        canvas.SetPixel(27, 28, 0, 0, 255)
 
-    canvas.SetPixel(25, 31, 255, 255, 0)
+        canvas.SetPixel(22, 29, 0, 0, 255)
+        canvas.SetPixel(24, 29, 255, 255, 0)
+        canvas.SetPixel(25, 29, 255, 255, 0)
+        canvas.SetPixel(27, 29, 0, 0, 255)
+
+        canvas.SetPixel(22, 30, 0, 0, 255)
+        canvas.SetPixel(25, 30, 255, 255, 0)
+
+        canvas.SetPixel(25, 31, 255, 255, 0)
 
 def draw_moon(canvas, is_star):
     for x in range(25, 27):
@@ -490,7 +532,7 @@ def draw_clock_left(canvas, blink_on):
     temp_color = get_temp_color(temp)
 
     now = datetime.now()
-    time_str = now.strftime("%I:%M")
+    time_str = now.strftime("%I:%M" if blink_on else "%I %M")
     month_str = now.strftime("%b")
     day_str = now.strftime("%d")
     canvas.Clear()
@@ -501,7 +543,7 @@ def draw_clock_left(canvas, blink_on):
     if (temp < 100):
         graphics.DrawText(canvas, wait_time_font, 2, 30, temp_color, f"{temp:.0f}")
         graphics.DrawText(canvas, arrival_time_font, 15, 27, temp_color, "°")
-        draw_weather(canvas, is_day)
+        draw_weather(canvas, is_day, not blink_on)
     else:
         graphics.DrawText(canvas, wait_time_font, 5, 30, temp_color, f"{temp:.0f}")
         graphics.DrawText(canvas, arrival_time_font, 24, 27, temp_color, "°")
@@ -523,19 +565,22 @@ def draw_spotify_art(canvas):
     art_square = ImageOps.fit(spotify_album_art, (size, size), method=resample)
     canvas.SetImage(art_square.convert("RGB"), 32, 0)
 
-def draw_weather(canvas, is_day):
+def draw_weather(canvas, is_day, is_animated):
     if weather_code in [300, 301, 302, 310, 311, 312, 313, 314, 321, 500, 501, 502, 503, 504, 511, 520, 521, 522, 531]:
-        draw_rain(canvas, False)
+        draw_rain(canvas, is_animated)
     elif weather_code in [200, 201, 202, 210, 211, 212, 221, 230, 231, 232]:
-        draw_thunderstorm(canvas, False)
+        draw_thunderstorm(canvas, is_animated)
     elif not is_day:
-        draw_moon(canvas, False)
+        draw_moon(canvas, is_animated)
     elif weather_code == 800:
         draw_sun(canvas)
     elif weather_code in [801, 802]:
         draw_partly_cloudy(canvas)
     else:
         draw_cloud(canvas)
+
+# systemctl stop sends SIGTERM; exit cleanly so the matrix gets cleared
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 # Initialize matrix
 matrix = RGBMatrix(options=options)
@@ -546,13 +591,22 @@ schedule_weather_update()
 schedule_spotify_update()
 schedule_bus_update()
 
+bus_cycle_start = time.monotonic()
+bus_screen = get_bus_screen()
+
 try:
     while True:
+        elapsed = time.monotonic() - bus_cycle_start
+        if elapsed >= BUS_CYCLE_SECONDS:
+            bus_cycle_start = time.monotonic()
+            bus_screen = get_bus_screen()
+            elapsed = 0
+
         offscreen_canvas.Clear()
         draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
-        draw_next_bus(offscreen_canvas)
+        draw_bus_right(offscreen_canvas, bus_screen, elapsed)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
-        time.sleep(1)
+        time.sleep(FRAME_INTERVAL)
 
 except KeyboardInterrupt:
     print("Exiting...")
