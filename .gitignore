@@ -1,0 +1,10 @@
+# API keys and secrets
+.env
+
+# Local Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# Leftovers from interrupted editor saves
+*.tmp.*

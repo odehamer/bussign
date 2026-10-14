@@ -1,0 +1,7 @@
+gtfs-realtime-bindings==2.0.0
+protobuf
+python-dotenv
+requests==2.32.3
+urllib3==2.2.2
+Pillow
+# rgbmatrix is loaded from /home/pi/rpi-rgb-led-matrix/bindings/python (built locally, not on PyPI)
