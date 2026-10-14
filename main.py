@@ -37,7 +37,7 @@ WEATHER_LON = os.getenv("WEATHER_LON", "")
 
 BUS_DURATION_MULTIPLIER = 1
 
-# Bus cycle: wait times while "<route> BUS TRACKER" scrolls, then arrival times
+# Bus cycle: wait times while "BUS TRACKER" scrolls, then arrival times
 LABEL_PAUSE = 0.5          # seconds the label holds still before scrolling
 FRAME_INTERVAL = 0.115625  # seconds per scroll pixel
 ARRIVAL_PAUSE = 0.25
@@ -77,7 +77,7 @@ options.hardware_mapping = 'adafruit-hat'
 # library would drop to, which breaks lazy imports (e.g. urllib3's HTTP/1 backend)
 options.drop_privileges = False
 
-arrival_times = []  # (arrival datetime, route id), sorted by time
+arrival_times = []  # sorted arrival datetimes
 last_bus_update = None  # time.monotonic() of the last successful bus fetch
 rain_expected = False
 current_temperature = 0
@@ -105,7 +105,6 @@ date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
 bus_text_color = graphics.Color(214, 11, 180)
-route_text_color = graphics.Color(255, 255, 255)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -134,7 +133,7 @@ def get_bus_times():
                         # skip buses that have already left
                         if arrival_time < datetime.now() - timedelta(minutes=1):
                             continue
-                        new_arrivals.append((arrival_time, entity.trip_update.trip.route_id))
+                        new_arrivals.append(arrival_time)
         # Swap in the whole list at once so the draw loop never sees a half-built list
         arrival_times = sorted(new_arrivals)
         last_bus_update = time.monotonic()
@@ -158,10 +157,8 @@ def get_wait_color(minutes):
 def get_bus_screen(count=3):
     # Snapshot of the next buses: wait strings, arrival strings, colors and the scrolling label
     now = datetime.now()
-    waits, arrivals, colors, routes = [], [], [], []
-    for t, route in arrival_times[:count]:
-        if route and route not in routes:
-            routes.append(route)
+    waits, arrivals, colors = [], [], []
+    for t in arrival_times[:count]:
         minutes = (t - now).total_seconds() / 60
         if minutes >= 1:
             waits.append(f"{math.ceil(minutes)}m")
@@ -175,9 +172,8 @@ def get_bus_screen(count=3):
         arrivals.append("")
         colors.append(default_color)
 
-    # Route numbers lead the label, e.g. "955 BUS TRACKER"; scrolling stops with the last 3 letters showing
-    route_text = " ".join(routes)
-    label = f"{route_text} BUS TRACKER" if route_text else "BUS TRACKER"
+    # Scrolling stops with the last 3 letters of the label showing
+    label = "BUS TRACKER"
     scroll_pixels = 10 * (len(label) - 3)
     scroll_end = LABEL_PAUSE + scroll_pixels * FRAME_INTERVAL
     arrivals_start = scroll_end + ARRIVAL_PAUSE
@@ -186,7 +182,6 @@ def get_bus_screen(count=3):
         "arrivals": arrivals,
         "colors": colors,
         "label": label,
-        "route_chars": len(route_text),
         "scroll_pixels": scroll_pixels,
         "scroll_end": scroll_end,
         "arrivals_start": arrivals_start,
@@ -203,8 +198,7 @@ def draw_bus_waits(canvas, screen, y_pos, x):
         y = 10 * (i + 1) + y_pos
         if letter == " " or y < 0 or y > 45:
             continue
-        color = route_text_color if i < screen["route_chars"] else bus_text_color
-        graphics.DrawText(canvas, wait_time_font, x + 24, y, color, letter)
+        graphics.DrawText(canvas, wait_time_font, x + 24, y, bus_text_color, letter)
 
 
 def draw_bus_arrivals(canvas, arrivals, colors, x):
