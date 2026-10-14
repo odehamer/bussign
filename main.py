@@ -40,9 +40,8 @@ BUS_DURATION_MULTIPLIER = 1
 BUS_WAIT_RED = 2
 BUS_WAIT_GREEN = 12
 
-# "BUS TRACKER" label scrolls up 1 pixel every FRAME_INTERVAL seconds
-FRAME_INTERVAL = 0.1
-LABEL_HEIGHT = 110  # baseline of the last letter relative to the label's top
+# Arrival time shown under the wait is the bus's arrival plus this ride time
+BUS_RIDE_MINUTES = 5
 
 # Configure the LED matrix
 options = RGBMatrixOptions()
@@ -74,10 +73,14 @@ arrival_time_font = graphics.Font()
 arrival_time_font.LoadFont("/home/pi/bustracker/fonts/6x10.bdf")
 bus_number_font = graphics.Font()
 bus_number_font.LoadFont("/home/pi/bustracker/fonts/4x6.bdf")
+next_bus_wait_font = graphics.Font()
+next_bus_wait_font.LoadFont("/home/pi/bustracker/fonts/8x13B.bdf")
 date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
 bus_text_color = graphics.Color(214, 11, 180)
+next_bus_arrival_color = graphics.Color(255, 100, 255)
+no_bus_color = graphics.Color(255, 0, 0)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -115,12 +118,6 @@ def schedule_bus_update():
     timer.start()
 
 
-def get_upcoming_wait_minutes(count=3):
-    now = datetime.now()
-    waits = [(t - now).total_seconds() / 60 for t in arrival_times]
-    return [w for w in waits if w >= 0][:count]
-
-
 def get_wait_color(minutes):
     # Red when the bus is about to arrive, fading through yellow to green once there's plenty of time
     if minutes <= BUS_WAIT_RED:
@@ -135,17 +132,28 @@ def get_wait_color(minutes):
     return graphics.Color(r, 255, 0)
 
 
-def draw_bus_times(canvas, label_y_pos):
-    waits = get_upcoming_wait_minutes()
-    values = []
-    colors = []
-    for w in waits:
-        values.append("now" if w < 1 else f"{min(int(w), 99)}m")
-        colors.append(get_wait_color(w))
-    while len(values) < 3:
-        values.append("--")
-        colors.append(default_color)
-    draw_bus_right(canvas, values, colors, wait_time_font, label_y_pos)
+def draw_centered_right(canvas, font, char_width, y, color, text):
+    # Center text within the right 32x32 half of the panel
+    x = 32 + max(0, (32 - len(text) * char_width) // 2)
+    graphics.DrawText(canvas, font, x, y, color, text)
+
+
+def draw_next_bus(canvas):
+    draw_centered_right(canvas, bus_number_font, 4, 6, default_color, "NEXT BUS")
+
+    upcoming = [t for t in arrival_times if t >= datetime.now()]
+    if not upcoming:
+        draw_centered_right(canvas, next_bus_wait_font, 8, 20, no_bus_color, "NONE")
+        return
+
+    next_bus_time = upcoming[0]
+    wait_minutes = (next_bus_time - datetime.now()).total_seconds() / 60
+    wait_text = "now" if wait_minutes < 1 else f"{min(int(wait_minutes), 99)}m"
+    draw_centered_right(canvas, next_bus_wait_font, 8, 20, get_wait_color(wait_minutes), wait_text)
+
+    estimated_arrival = next_bus_time + timedelta(minutes=BUS_RIDE_MINUTES)
+    draw_centered_right(canvas, arrival_time_font, 6, 30, next_bus_arrival_color, estimated_arrival.strftime("%I:%M"))
+
 
 def get_openmeteo_weather():
     global current_temperature
@@ -504,25 +512,6 @@ def draw_blinking_clock(canvas):
     return draw_clock_left(canvas, False)
 
 
-def draw_bus_right(canvas, values, colors, text_font, y_pos=0, show_tracker_label=True):
-    graphics.DrawText(canvas, text_font, 34, 10, colors[0], values[0])
-    graphics.DrawText(canvas, text_font, 34, 20, colors[1], values[1])
-    graphics.DrawText(canvas, text_font, 34, 30, colors[2], values[2])
-
-    if show_tracker_label:
-        graphics.DrawText(canvas, wait_time_font, 56, 10 + y_pos, bus_text_color, "B")
-        graphics.DrawText(canvas, wait_time_font, 56, 20 + y_pos, bus_text_color, "U")
-        graphics.DrawText(canvas, wait_time_font, 56, 30 + y_pos, bus_text_color, "S")
-        graphics.DrawText(canvas, wait_time_font, 56, 40 + y_pos, bus_text_color, "")
-        graphics.DrawText(canvas, wait_time_font, 56, 50 + y_pos, bus_text_color, "T")
-        graphics.DrawText(canvas, wait_time_font, 56, 60 + y_pos, bus_text_color, "R")
-        graphics.DrawText(canvas, wait_time_font, 56, 70 + y_pos, bus_text_color, "A")
-        graphics.DrawText(canvas, wait_time_font, 56, 80 + y_pos, bus_text_color, "C")
-        graphics.DrawText(canvas, wait_time_font, 56, 90 + y_pos, bus_text_color, "K")
-        graphics.DrawText(canvas, wait_time_font, 56, 100 + y_pos, bus_text_color, "E")
-        graphics.DrawText(canvas, wait_time_font, 56, 110 + y_pos, bus_text_color, "R")
-
-
 def draw_spotify_art(canvas):
     if spotify_album_art is None:
         if spotify_track_name:
@@ -557,20 +546,13 @@ schedule_weather_update()
 schedule_spotify_update()
 schedule_bus_update()
 
-label_y_pos = 0
-
 try:
     while True:
         offscreen_canvas.Clear()
         draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
-        draw_bus_times(offscreen_canvas, label_y_pos)
+        draw_next_bus(offscreen_canvas)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
-
-        label_y_pos -= 1
-        if LABEL_HEIGHT + label_y_pos <= 0:
-            # Last letter has left the top; restart with the first letter entering from the bottom
-            label_y_pos = options.rows + 3
-        time.sleep(FRAME_INTERVAL)
+        time.sleep(1)
 
 except KeyboardInterrupt:
     print("Exiting...")
