@@ -68,6 +68,7 @@ NFL_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl
 NFL_TICKER_INTERVAL = 300
 NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
 NFL_TICKER_SPEED = 40        # pixels per second
+NFL_TICKER_PAUSE = 1.0       # seconds to hold on each game once it's centered
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress
@@ -484,6 +485,7 @@ def build_nfl_ticker(games):
         x += 1 + NFL_SEPARATOR_PADDING
 
     add_text("NFL", nfl_label_color, wait_time_font)
+    stops = []
     for game in games:
         add_separator()
         game_start = x
@@ -499,12 +501,29 @@ def build_nfl_ticker(games):
         segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
                          "kind": "text", "text": game["status"], "color": nfl_status_color,
                          "font": nfl_status_font, "y": NFL_STATUS_BASELINE})
-    return {"segments": segments, "width": x}
+        # Scroll distance at which this game sits centered on screen
+        stops.append(options.cols + game_start - (options.cols - (x - game_start)) // 2)
+    return {"segments": segments, "width": x, "stops": stops}
+
+
+def get_nfl_ticker_scroll(ticker, elapsed):
+    # Pixels scrolled after `elapsed` seconds: move at NFL_TICKER_SPEED, holding NFL_TICKER_PAUSE at each stop
+    scrolled = 0.0
+    for stop in ticker["stops"]:
+        travel = (stop - scrolled) / NFL_TICKER_SPEED
+        if elapsed < travel:
+            return scrolled + elapsed * NFL_TICKER_SPEED
+        elapsed -= travel
+        scrolled = stop
+        if elapsed < NFL_TICKER_PAUSE:
+            return scrolled
+        elapsed -= NFL_TICKER_PAUSE
+    return scrolled + elapsed * NFL_TICKER_SPEED
 
 
 def draw_nfl_ticker(canvas, ticker, elapsed):
     # Returns False once everything has scrolled fully off the left edge
-    offset = options.cols - int(elapsed * NFL_TICKER_SPEED)
+    offset = options.cols - int(get_nfl_ticker_scroll(ticker, elapsed))
     if offset + ticker["width"] < 0:
         return False
     for segment in ticker["segments"]:
