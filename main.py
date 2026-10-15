@@ -62,16 +62,19 @@ BUS_STALE_SECONDS = 120
 RAIN_LOOKAHEAD_HOURS = 6
 RAIN_CHANCE_THRESHOLD = 0.5  # forecast probability of precipitation (0-1)
 
-# NFL scores ticker: scrolls across the whole screen every NFL_TICKER_INTERVAL seconds.
-# Shows live and finished games from the current week, or last week's results if none have started yet.
+# NFL scores ticker: scrolls across the whole screen, only on days with games, showing that day's
+# games that have started or finished. Repeats every NFL_TICKER_LIVE_INTERVAL seconds while any
+# game is in progress, otherwise every NFL_TICKER_INTERVAL seconds.
 NFL_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+NFL_TICKER_LIVE_INTERVAL = 60
 NFL_TICKER_INTERVAL = 300
 NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
 NFL_TICKER_SPEED = 40        # pixels per second
 NFL_TICKER_PAUSE = 1.0       # seconds to hold on each game once it's centered
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
-NFL_POLL_SECONDS = 600       # how often to refresh scores
-NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress
+NFL_POLL_SECONDS = 600       # how often to refresh scores when nothing is happening
+NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress or about to kick off
+NFL_KICKOFF_WINDOW = 600     # start the fast refresh this many seconds before a kickoff
 NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
 NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
@@ -97,6 +100,8 @@ last_bus_update = None  # time.monotonic() of the last successful bus fetch
 rain_expected = False
 nfl_games = []  # live/finished games, see parse_nfl_games
 nfl_has_live = False
+nfl_games_day = ""  # YYYYMMDD that nfl_games belong to
+nfl_next_kickoff = None  # UTC datetime of today's next game that hasn't started
 nfl_logos = {}  # team abbreviation -> logo image (RGB, NFL_LOGO_SIZE square)
 current_temperature = 0
 weather_code = 0
@@ -411,36 +416,55 @@ def load_missing_nfl_logos(games):
 def get_nfl_scores():
     global nfl_games
     global nfl_has_live
+    global nfl_games_day
+    global nfl_next_kickoff
     try:
-        response = requests.get(NFL_SCOREBOARD_URL, timeout=10)
+        # ESPN groups games by US day, so the Sunday night game counts as Sunday
+        day = datetime.now().strftime("%Y%m%d")
+        response = requests.get(NFL_SCOREBOARD_URL, params={"dates": day}, timeout=10)
         response.raise_for_status()
         data = response.json()
         games = parse_nfl_games(data)
 
-        # Early in the week the scoreboard has moved on to unplayed games; fall back to last week's results
-        week = data.get("week", {}).get("number")
-        season = data.get("season", {})
-        if not games and week and week > 1:
-            response = requests.get(
-                NFL_SCOREBOARD_URL,
-                params={"seasontype": season.get("type"), "week": week - 1, "dates": season.get("year")},
-                timeout=10,
-            )
-            response.raise_for_status()
-            games = parse_nfl_games(response.json())
+        kickoffs = []
+        for event in data.get("events", []):
+            if event.get("status", {}).get("type", {}).get("state") == "pre" and event.get("date"):
+                kickoffs.append(datetime.fromisoformat(event["date"].replace("Z", "+00:00")))
 
         load_missing_nfl_logos(games)
         nfl_games = games
+        nfl_games_day = day
         nfl_has_live = any(g["state"] == "in" for g in games)
-        print(f"NFL scores updated: {len(games)} games, live: {nfl_has_live}")
+        nfl_next_kickoff = min(kickoffs) if kickoffs else None
+        print(f"NFL scores updated for {day}: {len(games)} started/finished, live: {nfl_has_live}, "
+              f"next kickoff: {nfl_next_kickoff}")
     except Exception as e:
         print(f"NFL scores error: {e}")
         # Keep the last known scores on error
 
 
+def get_nfl_poll_seconds():
+    # Refresh every minute while a game is on or one is about to start (kickoffs often run late)
+    if nfl_has_live:
+        return NFL_LIVE_POLL_SECONDS
+    if nfl_next_kickoff is not None:
+        until_kickoff = (nfl_next_kickoff - datetime.now(timezone.utc)).total_seconds()
+        if until_kickoff <= NFL_KICKOFF_WINDOW:
+            return NFL_LIVE_POLL_SECONDS
+        return min(NFL_POLL_SECONDS, until_kickoff - NFL_KICKOFF_WINDOW)
+    return NFL_POLL_SECONDS
+
+
+def get_todays_nfl_games():
+    # Ignore scores left over from a previous day until the next refresh replaces them
+    if nfl_games_day != datetime.now().strftime("%Y%m%d"):
+        return []
+    return nfl_games
+
+
 def schedule_nfl_update():
     get_nfl_scores()
-    timer = threading.Timer(NFL_LIVE_POLL_SECONDS if nfl_has_live else NFL_POLL_SECONDS, schedule_nfl_update)
+    timer = threading.Timer(get_nfl_poll_seconds(), schedule_nfl_update)
     timer.daemon = True
     timer.start()
 
@@ -997,7 +1021,7 @@ try:
                 time.sleep(NFL_TICKER_FRAME)
                 continue
             nfl_ticker = None
-            next_nfl_ticker_at = time.monotonic() + NFL_TICKER_INTERVAL
+            next_nfl_ticker_at = time.monotonic() + (NFL_TICKER_LIVE_INTERVAL if nfl_has_live else NFL_TICKER_INTERVAL)
             cycle_start = 0.0  # force a fresh cycle below
 
         cycle_seconds = bus_screen["cycle_seconds"] + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
@@ -1011,7 +1035,7 @@ try:
             elapsed = 0
 
             # Run the NFL ticker between cycles so it never cuts off the bus screens
-            games = nfl_games
+            games = get_todays_nfl_games()
             if games and time.monotonic() >= next_nfl_ticker_at:
                 nfl_ticker = build_nfl_ticker(games)
                 nfl_ticker_start = time.monotonic()
