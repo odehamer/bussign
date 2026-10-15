@@ -62,6 +62,16 @@ BUS_STALE_SECONDS = 120
 RAIN_LOOKAHEAD_HOURS = 6
 RAIN_CHANCE_THRESHOLD = 0.5  # forecast probability of precipitation (0-1)
 
+# NFL scores ticker: scrolls across the whole screen every NFL_TICKER_INTERVAL seconds.
+# Shows live and finished games from the current week, or last week's results if none have started yet.
+NFL_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+NFL_TICKER_INTERVAL = 300
+NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
+NFL_TICKER_SPEED = 40        # pixels per second
+NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
+NFL_POLL_SECONDS = 600       # how often to refresh scores
+NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress
+
 # Configure the LED matrix
 options = RGBMatrixOptions()
 options.rows = 32
@@ -80,6 +90,8 @@ options.drop_privileges = False
 arrival_times = []  # sorted arrival datetimes
 last_bus_update = None  # time.monotonic() of the last successful bus fetch
 rain_expected = False
+nfl_games = []  # live/finished games, see parse_nfl_games
+nfl_has_live = False
 current_temperature = 0
 weather_code = 0
 sunrise_time = None
@@ -105,6 +117,10 @@ date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
 bus_text_color = graphics.Color(214, 11, 180)
+nfl_label_color = graphics.Color(213, 10, 10)
+nfl_score_color = graphics.Color(255, 255, 255)
+nfl_loser_score_color = graphics.Color(120, 120, 120)
+nfl_status_color = graphics.Color(43, 224, 227)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -303,6 +319,131 @@ def schedule_weather_update():
     timer = threading.Timer(600.0, schedule_weather_update)  # 600 seconds = 10 minutes
     timer.daemon = True
     timer.start()
+
+
+def get_team_color(team):
+    # ESPN gives a primary and alternate hex color; many primaries are too dark for LEDs
+    def parse(hex_color):
+        hex_color = (hex_color or "").lstrip("#")
+        if len(hex_color) != 6:
+            return None
+        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+    rgb = parse(team.get("color")) or (255, 255, 255)
+    alternate = parse(team.get("alternateColor"))
+    if max(rgb) < 100 and alternate and max(alternate) > max(rgb):
+        rgb = alternate
+    peak = max(rgb)
+    if peak == 0:
+        return (255, 255, 255)
+    if peak < 180:
+        rgb = tuple(min(255, int(c * 180 / peak)) for c in rgb)
+    return rgb
+
+
+def parse_nfl_games(data):
+    games = []
+    for event in data.get("events", []):
+        status = event.get("status", {}).get("type", {})
+        state = status.get("state")
+        # pre = not started yet; only show games in progress or finished
+        if state not in ("in", "post"):
+            continue
+        competition = (event.get("competitions") or [{}])[0]
+        sides = {c.get("homeAway"): c for c in competition.get("competitors", [])}
+        if "home" not in sides or "away" not in sides:
+            continue
+        # Keep statuses short: "Final" -> "F", "Final/OT" -> "F/OT", "8:42 - 3rd" -> "8:42 3RD"
+        status_text = (status.get("shortDetail") or "").upper().replace("FINAL", "F").replace(" - ", " ")
+        game = {"state": state, "status": status_text}
+        for side in ("away", "home"):
+            competitor = sides[side]
+            team = competitor.get("team", {})
+            game[side] = {
+                "abbr": team.get("abbreviation", "?"),
+                "score": competitor.get("score", "0"),
+                "winner": bool(competitor.get("winner")),
+                "color": get_team_color(team),
+            }
+        games.append(game)
+    return games
+
+
+def get_nfl_scores():
+    global nfl_games
+    global nfl_has_live
+    try:
+        response = requests.get(NFL_SCOREBOARD_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        games = parse_nfl_games(data)
+
+        # Early in the week the scoreboard has moved on to unplayed games; fall back to last week's results
+        week = data.get("week", {}).get("number")
+        season = data.get("season", {})
+        if not games and week and week > 1:
+            response = requests.get(
+                NFL_SCOREBOARD_URL,
+                params={"seasontype": season.get("type"), "week": week - 1, "dates": season.get("year")},
+                timeout=10,
+            )
+            response.raise_for_status()
+            games = parse_nfl_games(response.json())
+
+        nfl_games = games
+        nfl_has_live = any(g["state"] == "in" for g in games)
+        print(f"NFL scores updated: {len(games)} games, live: {nfl_has_live}")
+    except Exception as e:
+        print(f"NFL scores error: {e}")
+        # Keep the last known scores on error
+
+
+def schedule_nfl_update():
+    get_nfl_scores()
+    timer = threading.Timer(NFL_LIVE_POLL_SECONDS if nfl_has_live else NFL_POLL_SECONDS, schedule_nfl_update)
+    timer.daemon = True
+    timer.start()
+
+
+def build_nfl_ticker(games):
+    # Lay the scores out once as colored text segments: [(x offset, text, color)], plus total width
+    font = wait_time_font
+    segments = []
+    x = 0
+
+    def add(text, color=None):
+        nonlocal x
+        if color is not None:
+            segments.append((x, text, color))
+        x += sum(font.CharacterWidth(ord(c)) for c in text)
+
+    add("NFL", nfl_label_color)
+    for game in games:
+        add("   ")
+        for side in ("away", "home"):
+            team = game[side]
+            add(team["abbr"], graphics.Color(*team["color"]))
+            add(" ")
+            losing = game["state"] == "post" and not team["winner"]
+            add(team["score"], nfl_loser_score_color if losing else nfl_score_color)
+            add("  ")
+        add(game["status"], nfl_status_color)
+    return {"segments": segments, "width": x}
+
+
+def draw_nfl_ticker(canvas, ticker, elapsed):
+    # Returns False once the text has scrolled fully off the left edge
+    offset = options.cols - int(elapsed * NFL_TICKER_SPEED)
+    if offset + ticker["width"] < 0:
+        return False
+    for i, (x, text, color) in enumerate(ticker["segments"]):
+        left = offset + x
+        next_x = ticker["segments"][i + 1][0] if i + 1 < len(ticker["segments"]) else ticker["width"]
+        # Only draw segments that are at least partly on screen
+        if left >= options.cols or offset + next_x < 0:
+            continue
+        graphics.DrawText(canvas, wait_time_font, left, 21, color, text)
+    return True
 
 
 def get_spotify_access_token():
@@ -731,6 +872,10 @@ schedule_spotify_update()
 schedule_bus_update()
 
 STARTED_AT = time.monotonic()
+schedule_nfl_update()
+nfl_ticker = None
+nfl_ticker_start = 0.0
+next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
 has_buses = bool(arrival_times)
@@ -748,6 +893,18 @@ try:
             time.sleep(1)
             continue
 
+        if nfl_ticker is not None:
+            # NFL ticker takes over the whole screen until it has scrolled past
+            offscreen_canvas.brightness = brightness
+            offscreen_canvas.Clear()
+            if draw_nfl_ticker(offscreen_canvas, nfl_ticker, time.monotonic() - nfl_ticker_start):
+                offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+                time.sleep(NFL_TICKER_FRAME)
+                continue
+            nfl_ticker = None
+            next_nfl_ticker_at = time.monotonic() + NFL_TICKER_INTERVAL
+            cycle_start = 0.0  # force a fresh cycle below
+
         cycle_seconds = bus_screen["cycle_seconds"] + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
         elapsed = time.monotonic() - cycle_start
         if spotify_now != showing_spotify or elapsed >= cycle_seconds:
@@ -757,6 +914,13 @@ try:
             bus_screen = get_bus_screen()
             has_buses = bool(arrival_times)
             elapsed = 0
+
+            # Run the NFL ticker between cycles so it never cuts off the bus screens
+            games = nfl_games
+            if games and time.monotonic() >= next_nfl_ticker_at:
+                nfl_ticker = build_nfl_ticker(games)
+                nfl_ticker_start = time.monotonic()
+                continue
 
         stale = bus_data_is_stale()
         offscreen_canvas.brightness = brightness
