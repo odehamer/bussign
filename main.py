@@ -81,6 +81,13 @@ NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
 NFL_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary"
 TD_FLASH_SECONDS = 2.4       # "TOUCHDOWN" flashes this long before the play details scroll
 TD_ALERT_MAX_AGE = 600       # drop touchdown alerts that couldn't be shown within this many seconds
+
+# Favorite team (ESPN abbreviation): its game leads the ticker, holds longer and is underlined,
+# and its touchdowns get a longer alert with a flashing border
+FAVORITE_TEAM = "ATL"
+NFL_FAVORITE_PAUSE = 2.0         # seconds to hold on the favorite team's game in the ticker
+FAVORITE_TD_FLASH_SECONDS = 4.0  # "TOUCHDOWN" flash length for the favorite team
+TD_ALERTS_FAVORITE_ONLY = False  # True = only alert for the favorite team's touchdowns
 NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
 NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
@@ -392,6 +399,7 @@ def parse_nfl_games(data):
                 # logoDark is ESPN's version for dark backgrounds
                 "logo_url": team.get("logoDark") or team.get("logo") or "",
             }
+        game["favorite"] = FAVORITE_TEAM in (game["away"]["abbr"], game["home"]["abbr"])
         games.append(game)
     return games
 
@@ -458,6 +466,8 @@ def check_for_touchdowns(games):
             if (play.get("scoringType") or {}).get("name") != "touchdown":
                 continue
             abbr = (play.get("team") or {}).get("abbreviation", "")
+            if TD_ALERTS_FAVORITE_ONLY and abbr != FAVORITE_TEAM:
+                continue
             team = teams.get(abbr)
             opponent = next((t for a, t in teams.items() if a != abbr), None)
             away_score, home_score = to_int(play.get("awayScore")), to_int(play.get("homeScore"))
@@ -471,6 +481,7 @@ def check_for_touchdowns(games):
                 "scorer": scorer,
                 "description": description,
                 "queued_at": time.monotonic(),
+                "favorite": abbr == FAVORITE_TEAM,
             })
             print(f"Touchdown {abbr}: {description} ({team_score}-{opponent_score})")
         track["checked_total"] = latest_total
@@ -587,7 +598,8 @@ def build_nfl_ticker(games):
 
     add_text("NFL", nfl_label_color, wait_time_font)
     stops = []
-    for game in games:
+    # Favorite team's game first; the rest keep ESPN's order
+    for game in sorted(games, key=lambda g: not g["favorite"]):
         add_separator()
         game_start = x
         for i, side in enumerate(("away", "home")):
@@ -602,23 +614,29 @@ def build_nfl_ticker(games):
         segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
                          "kind": "text", "text": game["status"], "color": nfl_status_color,
                          "font": nfl_status_font, "y": NFL_STATUS_BASELINE})
-        # Scroll distance at which this game sits centered on screen
-        stops.append(options.cols + game_start - (options.cols - (x - game_start)) // 2)
+        if game["favorite"]:
+            # Underline the favorite's game in its team color
+            favorite = game["away"] if game["away"]["abbr"] == FAVORITE_TEAM else game["home"]
+            segments.append({"x": game_start, "width": x - game_start, "kind": "underline",
+                             "color": favorite["color"]})
+        # Scroll distance at which this game sits centered on screen, and how long to hold there
+        stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2,
+                      NFL_FAVORITE_PAUSE if game["favorite"] else NFL_TICKER_PAUSE))
     return {"segments": segments, "width": x, "stops": stops}
 
 
 def get_nfl_ticker_scroll(ticker, elapsed):
-    # Pixels scrolled after `elapsed` seconds: move at NFL_TICKER_SPEED, holding NFL_TICKER_PAUSE at each stop
+    # Pixels scrolled after `elapsed` seconds: move at NFL_TICKER_SPEED, holding at each stop
     scrolled = 0.0
-    for stop in ticker["stops"]:
+    for stop, pause in ticker["stops"]:
         travel = (stop - scrolled) / NFL_TICKER_SPEED
         if elapsed < travel:
             return scrolled + elapsed * NFL_TICKER_SPEED
         elapsed -= travel
         scrolled = stop
-        if elapsed < NFL_TICKER_PAUSE:
+        if elapsed < pause:
             return scrolled
-        elapsed -= NFL_TICKER_PAUSE
+        elapsed -= pause
     return scrolled + elapsed * NFL_TICKER_SPEED
 
 
@@ -639,6 +657,9 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
         elif segment["kind"] == "line" and left >= 0:
             for y in range(3, options.rows - 3):
                 canvas.SetPixel(left, y, *nfl_separator_color)
+        elif segment["kind"] == "underline":
+            for x in range(max(0, left), min(options.cols, left + segment["width"])):
+                canvas.SetPixel(x, options.rows - 2, *segment["color"])
     return True
 
 
@@ -658,18 +679,35 @@ def build_td_alert(alert):
     color = graphics.Color(*alert["color"])
     width = lambda text: sum(arrival_time_font.CharacterWidth(ord(c)) for c in text)
     parts = [(0, scorer, color), (width(scorer), rest, nfl_score_color)]
-    return {**alert, "team_color": color, "parts": parts, "text_width": width(scorer) + width(rest)}
+    flash_seconds = FAVORITE_TD_FLASH_SECONDS if alert.get("favorite") else TD_FLASH_SECONDS
+    return {**alert, "team_color": color, "parts": parts, "text_width": width(scorer) + width(rest),
+            "flash_seconds": flash_seconds}
 
 
 def draw_td_alert(canvas, alert, elapsed):
     # Returns False once the alert has finished
-    if elapsed < TD_FLASH_SECONDS:
+    if elapsed < alert["flash_seconds"]:
         # Flash "TOUCHDOWN" between the team color and white
-        flash_color = alert["team_color"] if int(elapsed / 0.3) % 2 == 0 else nfl_score_color
-        graphics.DrawText(canvas, wait_time_font, 1, 21, flash_color, "TOUCHDOWN")
+        team_phase = int(elapsed / 0.3) % 2 == 0
+        flash_color = alert["team_color"] if team_phase else nfl_score_color
+        if alert.get("favorite"):
+            # Narrower bold font so the word fits inside the border
+            graphics.DrawText(canvas, nfl_score_font, (options.cols - 9 * 6) // 2, 21, flash_color, "TOUCHDOWN")
+        else:
+            graphics.DrawText(canvas, wait_time_font, 1, 21, flash_color, "TOUCHDOWN")
+        if alert.get("favorite"):
+            # Favorite team: border flashing opposite the text
+            border = nfl_score_color if team_phase else alert["team_color"]
+            rgb = (border.red, border.green, border.blue)
+            for x in range(options.cols):
+                canvas.SetPixel(x, 0, *rgb)
+                canvas.SetPixel(x, options.rows - 1, *rgb)
+            for y in range(options.rows):
+                canvas.SetPixel(0, y, *rgb)
+                canvas.SetPixel(options.cols - 1, y, *rgb)
         return True
 
-    scrolled = int((elapsed - TD_FLASH_SECONDS) * NFL_TICKER_SPEED)
+    scrolled = int((elapsed - alert["flash_seconds"]) * NFL_TICKER_SPEED)
     if options.cols - scrolled + alert["text_width"] < 0:
         return False
 
