@@ -72,7 +72,9 @@ NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress
 NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
-NFL_SEPARATOR_PADDING = 6    # blank pixels either side of the line between games
+NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
+NFL_LOGO_GAP = 1             # pixels between a logo and its score
+NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
 
 # Configure the LED matrix
 options = RGBMatrixOptions()
@@ -116,6 +118,10 @@ arrival_time_font = graphics.Font()
 arrival_time_font.LoadFont("/home/pi/bustracker/fonts/6x10.bdf")
 bus_number_font = graphics.Font()
 bus_number_font.LoadFont("/home/pi/bustracker/fonts/4x6.bdf")
+nfl_status_font = graphics.Font()
+nfl_status_font.LoadFont("/home/pi/bustracker/fonts/5x7.bdf")
+nfl_score_font = graphics.Font()
+nfl_score_font.LoadFont("/home/pi/bustracker/fonts/6x13B.bdf")
 date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
@@ -452,12 +458,12 @@ def build_nfl_ticker(games):
     def text_width(text, font):
         return sum(font.CharacterWidth(ord(c)) for c in text)
 
-    def add_text(text, color=None):
+    def add_text(text, color=None, font=nfl_score_font):
         nonlocal x
-        width = text_width(text, wait_time_font)
+        width = text_width(text, font)
         if color is not None:
             segments.append({"x": x, "width": width, "kind": "text", "text": text, "color": color,
-                             "font": wait_time_font, "y": NFL_SCORE_BASELINE})
+                             "font": font, "y": NFL_SCORE_BASELINE})
         x += width
 
     def add_team(team):
@@ -469,7 +475,7 @@ def build_nfl_ticker(games):
             add_text(" ")
             return
         segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "image", "image": logo})
-        x += NFL_LOGO_SIZE + 3
+        x += NFL_LOGO_SIZE + NFL_LOGO_GAP
 
     def add_separator():
         nonlocal x
@@ -477,7 +483,7 @@ def build_nfl_ticker(games):
         segments.append({"x": x, "width": 1, "kind": "line"})
         x += 1 + NFL_SEPARATOR_PADDING
 
-    add_text("NFL", nfl_label_color)
+    add_text("NFL", nfl_label_color, wait_time_font)
     for game in games:
         add_separator()
         game_start = x
@@ -487,12 +493,12 @@ def build_nfl_ticker(games):
             losing = game["state"] == "post" and not team["winner"]
             add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
             if i == 0:
-                add_text("  ")
+                x += NFL_TEAM_GAP
         # Status ("F", "8:42 3RD", "HALFTIME") in small text centered above the game
-        status_width = text_width(game["status"], bus_number_font)
+        status_width = text_width(game["status"], nfl_status_font)
         segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
                          "kind": "text", "text": game["status"], "color": nfl_status_color,
-                         "font": bus_number_font, "y": NFL_STATUS_BASELINE})
+                         "font": nfl_status_font, "y": NFL_STATUS_BASELINE})
     return {"segments": segments, "width": x}
 
 
