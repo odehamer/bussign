@@ -71,6 +71,8 @@ NFL_TICKER_SPEED = 40        # pixels per second
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress
+NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
+NFL_SEPARATOR_PADDING = 6    # blank pixels either side of the line between games
 
 # Configure the LED matrix
 options = RGBMatrixOptions()
@@ -92,6 +94,7 @@ last_bus_update = None  # time.monotonic() of the last successful bus fetch
 rain_expected = False
 nfl_games = []  # live/finished games, see parse_nfl_games
 nfl_has_live = False
+nfl_logos = {}  # team abbreviation -> logo image (RGB, NFL_LOGO_SIZE square)
 current_temperature = 0
 weather_code = 0
 sunrise_time = None
@@ -121,6 +124,7 @@ nfl_label_color = graphics.Color(213, 10, 10)
 nfl_score_color = graphics.Color(255, 255, 255)
 nfl_loser_score_color = graphics.Color(120, 120, 120)
 nfl_status_color = graphics.Color(43, 224, 227)
+nfl_separator_color = (70, 70, 70)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -364,9 +368,37 @@ def parse_nfl_games(data):
                 "score": competitor.get("score", "0"),
                 "winner": bool(competitor.get("winner")),
                 "color": get_team_color(team),
+                # logoDark is ESPN's version for dark backgrounds
+                "logo_url": team.get("logoDark") or team.get("logo") or "",
             }
         games.append(game)
     return games
+
+
+def load_nfl_logo(url):
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    logo = Image.open(io.BytesIO(response.content)).convert("RGBA")
+    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+    logo.thumbnail((NFL_LOGO_SIZE, NFL_LOGO_SIZE), resample)
+    # Flatten transparency onto black and center it in a square tile
+    tile = Image.new("RGB", (NFL_LOGO_SIZE, NFL_LOGO_SIZE), (0, 0, 0))
+    position = ((NFL_LOGO_SIZE - logo.width) // 2, (NFL_LOGO_SIZE - logo.height) // 2)
+    tile.paste(logo, position, logo)
+    return tile
+
+
+def load_missing_nfl_logos(games):
+    # Logos don't change, so each team is downloaded once per run
+    for game in games:
+        for side in ("away", "home"):
+            team = game[side]
+            if team["abbr"] in nfl_logos or not team["logo_url"]:
+                continue
+            try:
+                nfl_logos[team["abbr"]] = load_nfl_logo(team["logo_url"])
+            except Exception as e:
+                print(f"NFL logo error for {team['abbr']}: {e}")
 
 
 def get_nfl_scores():
@@ -390,6 +422,7 @@ def get_nfl_scores():
             response.raise_for_status()
             games = parse_nfl_games(response.json())
 
+        load_missing_nfl_logos(games)
         nfl_games = games
         nfl_has_live = any(g["state"] == "in" for g in games)
         print(f"NFL scores updated: {len(games)} games, live: {nfl_has_live}")
@@ -406,43 +439,65 @@ def schedule_nfl_update():
 
 
 def build_nfl_ticker(games):
-    # Lay the scores out once as colored text segments: [(x offset, text, color)], plus total width
+    # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
     font = wait_time_font
     segments = []
     x = 0
 
-    def add(text, color=None):
+    def add_text(text, color=None):
         nonlocal x
+        width = sum(font.CharacterWidth(ord(c)) for c in text)
         if color is not None:
-            segments.append((x, text, color))
-        x += sum(font.CharacterWidth(ord(c)) for c in text)
+            segments.append({"x": x, "width": width, "kind": "text", "text": text, "color": color})
+        x += width
 
-    add("NFL", nfl_label_color)
+    def add_logo(abbr):
+        nonlocal x
+        logo = nfl_logos.get(abbr)
+        if logo is None:
+            return
+        segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "image", "image": logo})
+        x += NFL_LOGO_SIZE + 2
+
+    def add_separator():
+        nonlocal x
+        x += NFL_SEPARATOR_PADDING
+        segments.append({"x": x, "width": 1, "kind": "line"})
+        x += 1 + NFL_SEPARATOR_PADDING
+
+    add_text("NFL", nfl_label_color)
     for game in games:
-        add("   ")
+        add_separator()
         for side in ("away", "home"):
             team = game[side]
-            add(team["abbr"], graphics.Color(*team["color"]))
-            add(" ")
+            add_logo(team["abbr"])
+            add_text(team["abbr"], graphics.Color(*team["color"]))
+            add_text(" ")
             losing = game["state"] == "post" and not team["winner"]
-            add(team["score"], nfl_loser_score_color if losing else nfl_score_color)
-            add("  ")
-        add(game["status"], nfl_status_color)
+            add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
+            add_text("  ")
+        add_text(game["status"], nfl_status_color)
     return {"segments": segments, "width": x}
 
 
 def draw_nfl_ticker(canvas, ticker, elapsed):
-    # Returns False once the text has scrolled fully off the left edge
+    # Returns False once everything has scrolled fully off the left edge
     offset = options.cols - int(elapsed * NFL_TICKER_SPEED)
     if offset + ticker["width"] < 0:
         return False
-    for i, (x, text, color) in enumerate(ticker["segments"]):
-        left = offset + x
-        next_x = ticker["segments"][i + 1][0] if i + 1 < len(ticker["segments"]) else ticker["width"]
+    logo_top = (options.rows - NFL_LOGO_SIZE) // 2
+    for segment in ticker["segments"]:
+        left = offset + segment["x"]
         # Only draw segments that are at least partly on screen
-        if left >= options.cols or offset + next_x < 0:
+        if left >= options.cols or left + segment["width"] < 0:
             continue
-        graphics.DrawText(canvas, wait_time_font, left, 21, color, text)
+        if segment["kind"] == "text":
+            graphics.DrawText(canvas, wait_time_font, left, 21, segment["color"], segment["text"])
+        elif segment["kind"] == "image":
+            canvas.SetImage(segment["image"], left, logo_top)
+        elif segment["kind"] == "line" and left >= 0:
+            for y in range(5, options.rows - 5):
+                canvas.SetPixel(left, y, *nfl_separator_color)
     return True
 
 
