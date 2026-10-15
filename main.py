@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import time
 import math
 import io
+import re
+from collections import deque
 from google.protobuf.message import Message
 from google.transit import gtfs_realtime_pb2
 import sys
@@ -76,6 +78,9 @@ NFL_POLL_SECONDS = 600       # how often to refresh scores when nothing is happe
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress or about to kick off
 NFL_KICKOFF_WINDOW = 600     # start the fast refresh this many seconds before a kickoff
 NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
+NFL_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary"
+TD_FLASH_SECONDS = 2.4       # "TOUCHDOWN" flashes this long before the play details scroll
+TD_ALERT_MAX_AGE = 600       # drop touchdown alerts that couldn't be shown within this many seconds
 NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
 NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
@@ -102,6 +107,10 @@ nfl_games = []  # live/finished games, see parse_nfl_games
 nfl_has_live = False
 nfl_games_day = ""  # YYYYMMDD that nfl_games belong to
 nfl_next_kickoff = None  # UTC datetime of today's next game that hasn't started
+# Per game: total points when first seen (older plays are never alerted), total covered by the
+# last summary fetch, and scoring play ids already handled
+nfl_score_tracking = {}
+nfl_td_alerts = deque()  # touchdowns waiting to be shown
 nfl_logos = {}  # team abbreviation -> logo image (RGB, NFL_LOGO_SIZE square)
 current_temperature = 0
 weather_code = 0
@@ -371,7 +380,7 @@ def parse_nfl_games(data):
             continue
         # Shown in small text above the scores: "FINAL", "FINAL/OT", "8:42 3RD", "HALFTIME"
         status_text = (status.get("shortDetail") or "").upper().replace(" - ", " ")
-        game = {"state": state, "status": status_text}
+        game = {"id": event.get("id"), "state": state, "status": status_text}
         for side in ("away", "home"):
             competitor = sides[side]
             team = competitor.get("team", {})
@@ -398,6 +407,73 @@ def load_nfl_logo(url):
     position = ((NFL_LOGO_SIZE - logo.width) // 2, (NFL_LOGO_SIZE - logo.height) // 2)
     tile.paste(logo, position, logo)
     return tile
+
+
+def to_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def clean_play_text(text):
+    # "Bucky Irving 5 Yd pass from Jalon Daniels (Chase McLaughlin Kick)" -> scorer and description
+    description = re.sub(r"\s*\(.*?\)", "", text or "").strip()
+    match = re.match(r"^(.*?)\s+\d+\s+Yd", description)
+    scorer = match.group(1) if match else ""
+    return scorer.upper(), description.upper()
+
+
+def check_for_touchdowns(games):
+    # The scoreboard only has totals; when a game's total goes up, fetch that game's scoring plays
+    for game in games:
+        if not game["id"]:
+            continue
+        total = to_int(game["away"]["score"]) + to_int(game["home"]["score"])
+        track = nfl_score_tracking.get(game["id"])
+        if track is None:
+            nfl_score_tracking[game["id"]] = {"baseline": total, "checked_total": total, "seen": set()}
+            continue
+        if total <= track["checked_total"]:
+            continue
+        try:
+            response = requests.get(NFL_SUMMARY_URL, params={"event": game["id"]}, timeout=10)
+            response.raise_for_status()
+            plays = response.json().get("scoringPlays", [])
+        except Exception as e:
+            print(f"NFL scoring plays error: {e}")
+            continue  # try again on the next refresh
+
+        teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
+        latest_total = track["checked_total"]
+        for play in plays:
+            play_total = to_int(play.get("awayScore")) + to_int(play.get("homeScore"))
+            # The summary can lag the scoreboard; only count what it actually includes
+            latest_total = max(latest_total, play_total)
+            if play.get("id") in track["seen"]:
+                continue
+            track["seen"].add(play.get("id"))
+            if play_total <= track["baseline"]:
+                continue  # scored before we started watching this game
+            if (play.get("scoringType") or {}).get("name") != "touchdown":
+                continue
+            abbr = (play.get("team") or {}).get("abbreviation", "")
+            team = teams.get(abbr)
+            opponent = next((t for a, t in teams.items() if a != abbr), None)
+            away_score, home_score = to_int(play.get("awayScore")), to_int(play.get("homeScore"))
+            team_score, opponent_score = (away_score, home_score) if team is game["away"] else (home_score, away_score)
+            scorer, description = clean_play_text(play.get("text"))
+            nfl_td_alerts.append({
+                "abbr": abbr,
+                "color": team["color"] if team else (255, 255, 255),
+                "opponent": opponent["abbr"] if opponent else "",
+                "score": f"{team_score}-{opponent_score}",
+                "scorer": scorer,
+                "description": description,
+                "queued_at": time.monotonic(),
+            })
+            print(f"Touchdown {abbr}: {description} ({team_score}-{opponent_score})")
+        track["checked_total"] = latest_total
 
 
 def load_missing_nfl_logos(games):
@@ -432,6 +508,7 @@ def get_nfl_scores():
                 kickoffs.append(datetime.fromisoformat(event["date"].replace("Z", "+00:00")))
 
         load_missing_nfl_logos(games)
+        check_for_touchdowns(games)
         nfl_games = games
         nfl_games_day = day
         nfl_has_live = any(g["state"] == "in" for g in games)
@@ -562,6 +639,53 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
         elif segment["kind"] == "line" and left >= 0:
             for y in range(3, options.rows - 3):
                 canvas.SetPixel(left, y, *nfl_separator_color)
+    return True
+
+
+def next_td_alert():
+    # Oldest touchdown that's still fresh, or None
+    while nfl_td_alerts:
+        alert = nfl_td_alerts.popleft()
+        if time.monotonic() - alert["queued_at"] <= TD_ALERT_MAX_AGE:
+            return alert
+    return None
+
+
+def build_td_alert(alert):
+    # Scrolling line: scorer's name in team color, the rest of the play in white
+    scorer = alert["scorer"]
+    rest = alert["description"][len(scorer):] if scorer and alert["description"].startswith(scorer) else " " + alert["description"]
+    color = graphics.Color(*alert["color"])
+    width = lambda text: sum(arrival_time_font.CharacterWidth(ord(c)) for c in text)
+    parts = [(0, scorer, color), (width(scorer), rest, nfl_score_color)]
+    return {**alert, "team_color": color, "parts": parts, "text_width": width(scorer) + width(rest)}
+
+
+def draw_td_alert(canvas, alert, elapsed):
+    # Returns False once the alert has finished
+    if elapsed < TD_FLASH_SECONDS:
+        # Flash "TOUCHDOWN" between the team color and white
+        flash_color = alert["team_color"] if int(elapsed / 0.3) % 2 == 0 else nfl_score_color
+        graphics.DrawText(canvas, wait_time_font, 1, 21, flash_color, "TOUCHDOWN")
+        return True
+
+    scrolled = int((elapsed - TD_FLASH_SECONDS) * NFL_TICKER_SPEED)
+    if options.cols - scrolled + alert["text_width"] < 0:
+        return False
+
+    # Top: team logo and the score after the play (scoring team first)
+    logo = nfl_logos.get(alert["abbr"])
+    if logo is not None:
+        canvas.SetImage(logo, 1, 0)
+        score_x = NFL_LOGO_SIZE + 4
+    else:
+        graphics.DrawText(canvas, nfl_score_font, 1, 13, alert["team_color"], alert["abbr"])
+        score_x = 1 + len(alert["abbr"]) * 6 + 3
+    graphics.DrawText(canvas, nfl_score_font, score_x, 13, nfl_score_color, alert["score"])
+
+    # Bottom: the play, scrolling once
+    for x, text, color in alert["parts"]:
+        graphics.DrawText(canvas, arrival_time_font, options.cols - scrolled + x, 29, color, text)
     return True
 
 
@@ -994,6 +1118,8 @@ STARTED_AT = time.monotonic()
 schedule_nfl_update()
 nfl_ticker = None
 nfl_ticker_start = 0.0
+td_alert = None
+td_alert_start = 0.0
 next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
@@ -1022,6 +1148,22 @@ try:
                 continue
             nfl_ticker = None
             next_nfl_ticker_at = time.monotonic() + (NFL_TICKER_LIVE_INTERVAL if nfl_has_live else NFL_TICKER_INTERVAL)
+            cycle_start = 0.0  # force a fresh cycle below
+
+        # Touchdowns interrupt the clock/bus screens right away (but wait for a running ticker)
+        if td_alert is None and nfl_td_alerts:
+            alert = next_td_alert()
+            if alert is not None:
+                td_alert = build_td_alert(alert)
+                td_alert_start = time.monotonic()
+        if td_alert is not None:
+            offscreen_canvas.brightness = brightness
+            offscreen_canvas.Clear()
+            if draw_td_alert(offscreen_canvas, td_alert, time.monotonic() - td_alert_start):
+                offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+                time.sleep(NFL_TICKER_FRAME)
+                continue
+            td_alert = None
             cycle_start = 0.0  # force a fresh cycle below
 
         cycle_seconds = bus_screen["cycle_seconds"] + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
