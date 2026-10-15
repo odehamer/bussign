@@ -114,6 +114,7 @@ nfl_games = []  # live/finished games, see parse_nfl_games
 nfl_has_live = False
 nfl_games_day = ""  # YYYYMMDD that nfl_games belong to
 nfl_next_kickoff = None  # UTC datetime of today's next game that hasn't started
+nfl_last_summary = ""  # last logged NFL status, so unchanged refreshes stay quiet
 # Per game: total points when first seen (older plays are never alerted), total covered by the
 # last summary fetch, and scoring play ids already handled
 nfl_score_tracking = {}
@@ -157,6 +158,24 @@ date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
 
+# Sources that are currently failing -> number of failed attempts so far
+failing_sources = {}
+
+
+def log_error(source, error):
+    # Log the first failure in a run, then stay quiet while it keeps retrying
+    if source not in failing_sources:
+        print(f"{source} error: {error} (retrying quietly until it recovers)")
+    failing_sources[source] = failing_sources.get(source, 0) + 1
+
+
+def log_ok(source):
+    # Log once when a failing source starts working again
+    attempts = failing_sources.pop(source, None)
+    if attempts is not None:
+        print(f"{source} OK again after {attempts} failed attempt{'s' if attempts != 1 else ''}")
+
+
 # Get bus arrival times from MTS API
 def get_bus_times():
     global arrival_times
@@ -185,8 +204,9 @@ def get_bus_times():
         # Swap in the whole list at once so the draw loop never sees a half-built list
         arrival_times = sorted(new_arrivals)
         last_bus_update = time.monotonic()
+        log_ok("Bus data")
     except Exception as e:
-        print(f"Bus API error: {e}")
+        log_error("Bus data", e)
         # Keep existing arrival_times on error
 
 
@@ -294,7 +314,6 @@ def get_openmeteo_weather():
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
-        print(data)
 
         current_temperature = float(data['main']['temp'])
         weather_code = data['weather'][0]['id']
@@ -305,13 +324,12 @@ def get_openmeteo_weather():
         sunrise_time = datetime.fromtimestamp(sunrise_str)
         sunset_time = datetime.fromtimestamp(sunset_str)
 
-        print(f"Updated weather - Temp: {current_temperature}F, Code: {weather_code}")
-        print(f"Sunrise: {sunrise_time}, Sunset: {sunset_time}")
+        print(f"Weather: {current_temperature:.0f}F, code {weather_code}, "
+              f"sunrise {sunrise_time:%H:%M}, sunset {sunset_time:%H:%M}")
+        log_ok("Weather")
         
     except Exception as e:
-        print(f"Weather API error: {e}")
-        import traceback
-        traceback.print_exc()
+        log_error("Weather", e)
         # Keep the last known weather on error
 
 
@@ -339,10 +357,12 @@ def get_rain_forecast():
             ids = [w.get("id", 800) for w in slot.get("weather", [])]
             if slot.get("pop", 0) >= RAIN_CHANCE_THRESHOLD or any(i < 700 for i in ids):
                 expected = True
+        if expected != rain_expected or "Rain forecast" in failing_sources:
+            print(f"Rain forecast: {'rain' if expected else 'no rain'} expected in the next {RAIN_LOOKAHEAD_HOURS}h")
         rain_expected = expected
-        print(f"Rain expected in next {RAIN_LOOKAHEAD_HOURS}h: {rain_expected}")
+        log_ok("Rain forecast")
     except Exception as e:
-        print(f"Forecast API error: {e}")
+        log_error("Rain forecast", e)
         # Keep the last known forecast on error
 
 def schedule_weather_update():
@@ -449,8 +469,9 @@ def check_for_touchdowns(games):
             response.raise_for_status()
             plays = response.json().get("scoringPlays", [])
         except Exception as e:
-            print(f"NFL scoring plays error: {e}")
+            log_error("NFL scoring plays", e)
             continue  # try again on the next refresh
+        log_ok("NFL scoring plays")
 
         teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
         latest_total = track["checked_total"]
@@ -496,8 +517,9 @@ def load_missing_nfl_logos(games):
                 continue
             try:
                 nfl_logos[team["abbr"]] = load_nfl_logo(team["logo_url"])
+                log_ok(f"NFL logo {team['abbr']}")
             except Exception as e:
-                print(f"NFL logo error for {team['abbr']}: {e}")
+                log_error(f"NFL logo {team['abbr']}", e)
 
 
 def get_nfl_scores():
@@ -505,6 +527,7 @@ def get_nfl_scores():
     global nfl_has_live
     global nfl_games_day
     global nfl_next_kickoff
+    global nfl_last_summary
     try:
         # ESPN groups games by US day, so the Sunday night game counts as Sunday
         day = datetime.now().strftime("%Y%m%d")
@@ -524,10 +547,18 @@ def get_nfl_scores():
         nfl_games_day = day
         nfl_has_live = any(g["state"] == "in" for g in games)
         nfl_next_kickoff = min(kickoffs) if kickoffs else None
-        print(f"NFL scores updated for {day}: {len(games)} started/finished, live: {nfl_has_live}, "
-              f"next kickoff: {nfl_next_kickoff}")
+        log_ok("NFL scores")
+        if not data.get("events"):
+            summary = f"NFL: no games on {day}"
+        else:
+            live = sum(1 for g in games if g["state"] == "in")
+            kickoff = f", next kickoff {nfl_next_kickoff.astimezone():%H:%M}" if nfl_next_kickoff else ""
+            summary = f"NFL: {len(data['events'])} games on {day}, {live} live, {len(games) - live} finished{kickoff}"
+        if summary != nfl_last_summary:
+            print(summary)
+            nfl_last_summary = summary
     except Exception as e:
-        print(f"NFL scores error: {e}")
+        log_error("NFL scores", e)
         # Keep the last known scores on error
 
 
@@ -751,9 +782,10 @@ def get_spotify_access_token():
         data = response.json()
         spotify_access_token = data.get("access_token", "")
         spotify_token_expires_at = time.time() + int(data.get("expires_in", 3600))
+        log_ok("Spotify token")
         return spotify_access_token
     except Exception as e:
-        print(f"Spotify token error: {e}")
+        log_error("Spotify token", e)
         spotify_access_token = ""
         spotify_token_expires_at = 0
         return None
@@ -794,6 +826,7 @@ def fetch_spotify_now_playing():
         # 204 = nothing playing
         if response.status_code == 204:
             clear_spotify_now_playing()
+            log_ok("Spotify playback")
             return
 
         response.raise_for_status()
@@ -822,8 +855,9 @@ def fetch_spotify_now_playing():
         spotify_duration_ms = int(item.get("duration_ms") or 0)
         spotify_progress_at = time.monotonic()
         spotify_is_playing = bool(data.get("is_playing"))
+        log_ok("Spotify playback")
     except Exception as e:
-        print(f"Spotify playback error: {e}")
+        log_error("Spotify playback", e)
 
 
 def schedule_spotify_update():
