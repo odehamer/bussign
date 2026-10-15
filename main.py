@@ -451,13 +451,16 @@ def build_nfl_ticker(games):
             segments.append({"x": x, "width": width, "kind": "text", "text": text, "color": color})
         x += width
 
-    def add_logo(abbr):
+    def add_team(team):
+        # Logo only; fall back to the abbreviation if the logo couldn't be downloaded
         nonlocal x
-        logo = nfl_logos.get(abbr)
+        logo = nfl_logos.get(team["abbr"])
         if logo is None:
+            add_text(team["abbr"], graphics.Color(*team["color"]))
+            add_text(" ")
             return
         segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "image", "image": logo})
-        x += NFL_LOGO_SIZE + 2
+        x += NFL_LOGO_SIZE + 3
 
     def add_separator():
         nonlocal x
@@ -470,9 +473,7 @@ def build_nfl_ticker(games):
         add_separator()
         for side in ("away", "home"):
             team = game[side]
-            add_logo(team["abbr"])
-            add_text(team["abbr"], graphics.Color(*team["color"]))
-            add_text(" ")
+            add_team(team)
             losing = game["state"] == "post" and not team["winner"]
             add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
             add_text("  ")
