@@ -11,7 +11,7 @@ VENV=/home/pi/bustracker/.venv
 # Smoke-test imports
 "$VENV/bin/python" -c "import sys; sys.path.append('/home/pi/rpi-rgb-led-matrix/bindings/python'); import requests, dotenv, PIL, rgbmatrix; from google.transit import gtfs_realtime_pb2; print('imports OK')"
 
-sudo cp /home/pi/bustracker.service /etc/systemd/system/bustracker.service
+sudo cp /home/pi/bustracker/bustracker.service /etc/systemd/system/bustracker.service
 sudo systemctl daemon-reload
 sudo systemctl enable bustracker.service
 sudo systemctl restart bustracker.service
