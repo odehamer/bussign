@@ -357,8 +357,8 @@ def parse_nfl_games(data):
         sides = {c.get("homeAway"): c for c in competition.get("competitors", [])}
         if "home" not in sides or "away" not in sides:
             continue
-        # Keep statuses short: "Final" -> "F", "Final/OT" -> "F/OT", "8:42 - 3rd" -> "8:42 3RD"
-        status_text = (status.get("shortDetail") or "").upper().replace("FINAL", "F").replace(" - ", " ")
+        # Shown in small text above the scores: "FINAL", "FINAL/OT", "8:42 3RD", "HALFTIME"
+        status_text = (status.get("shortDetail") or "").upper().replace(" - ", " ")
         game = {"state": state, "status": status_text}
         for side in ("away", "home"):
             competitor = sides[side]
@@ -438,17 +438,26 @@ def schedule_nfl_update():
     timer.start()
 
 
+# Ticker rows: small status text on top, then logos and scores below it
+NFL_STATUS_BASELINE = 7
+NFL_LOGO_TOP = 10
+NFL_SCORE_BASELINE = 23
+
+
 def build_nfl_ticker(games):
     # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
-    font = wait_time_font
     segments = []
     x = 0
 
+    def text_width(text, font):
+        return sum(font.CharacterWidth(ord(c)) for c in text)
+
     def add_text(text, color=None):
         nonlocal x
-        width = sum(font.CharacterWidth(ord(c)) for c in text)
+        width = text_width(text, wait_time_font)
         if color is not None:
-            segments.append({"x": x, "width": width, "kind": "text", "text": text, "color": color})
+            segments.append({"x": x, "width": width, "kind": "text", "text": text, "color": color,
+                             "font": wait_time_font, "y": NFL_SCORE_BASELINE})
         x += width
 
     def add_team(team):
@@ -471,13 +480,19 @@ def build_nfl_ticker(games):
     add_text("NFL", nfl_label_color)
     for game in games:
         add_separator()
-        for side in ("away", "home"):
+        game_start = x
+        for i, side in enumerate(("away", "home")):
             team = game[side]
             add_team(team)
             losing = game["state"] == "post" and not team["winner"]
             add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
-            add_text("  ")
-        add_text(game["status"], nfl_status_color)
+            if i == 0:
+                add_text("  ")
+        # Status ("F", "8:42 3RD", "HALFTIME") in small text centered above the game
+        status_width = text_width(game["status"], bus_number_font)
+        segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
+                         "kind": "text", "text": game["status"], "color": nfl_status_color,
+                         "font": bus_number_font, "y": NFL_STATUS_BASELINE})
     return {"segments": segments, "width": x}
 
 
@@ -486,18 +501,17 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
     offset = options.cols - int(elapsed * NFL_TICKER_SPEED)
     if offset + ticker["width"] < 0:
         return False
-    logo_top = (options.rows - NFL_LOGO_SIZE) // 2
     for segment in ticker["segments"]:
         left = offset + segment["x"]
         # Only draw segments that are at least partly on screen
         if left >= options.cols or left + segment["width"] < 0:
             continue
         if segment["kind"] == "text":
-            graphics.DrawText(canvas, wait_time_font, left, 21, segment["color"], segment["text"])
+            graphics.DrawText(canvas, segment["font"], left, segment["y"], segment["color"], segment["text"])
         elif segment["kind"] == "image":
-            canvas.SetImage(segment["image"], left, logo_top)
+            canvas.SetImage(segment["image"], left, NFL_LOGO_TOP)
         elif segment["kind"] == "line" and left >= 0:
-            for y in range(5, options.rows - 5):
+            for y in range(3, options.rows - 3):
                 canvas.SetPixel(left, y, *nfl_separator_color)
     return True
 
