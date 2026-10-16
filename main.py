@@ -324,6 +324,8 @@ nfl_status_font = graphics.Font()
 nfl_status_font.LoadFont("/home/pi/bustracker/fonts/5x7.bdf")
 nfl_score_font = graphics.Font()
 nfl_score_font.LoadFont("/home/pi/bustracker/fonts/6x13B.bdf")
+clock_font = graphics.Font()
+clock_font.LoadFont("/home/pi/bustracker/fonts/10x20.bdf")
 date_font = graphics.Font()
 date_font.LoadFont("/home/pi/bustracker/fonts/5x8.bdf")
 default_color = graphics.Color(255, 255, 0)
@@ -1641,6 +1643,42 @@ def draw_umbrella(canvas):
         canvas.SetPixel(x, y, *handle)
 
 
+class ShiftedCanvas:
+    # Lets the pixel-art weather icons (drawn for the left half) be drawn somewhere else
+    def __init__(self, canvas, dx, dy=0):
+        self.canvas, self.dx, self.dy = canvas, dx, dy
+
+    def SetPixel(self, x, y, r, g, b):
+        self.canvas.SetPixel(x + self.dx, y + self.dy, r, g, b)
+
+
+def draw_weather_icon(canvas, now, is_day, blink_on):
+    # If rain is on the way but it isn't raining yet, alternate the icon with an umbrella every 2s
+    raining_now = weather_code < 700 and weather_code != 0
+    if rain_expected and not raining_now and (now.second // 2) % 2 == 1:
+        draw_umbrella(canvas)
+    else:
+        draw_weather(canvas, is_day, not blink_on)
+
+
+def draw_clock_full(canvas, blink_on):
+    # Whole-screen clock for when there are no buses: big time on top, then date, temperature
+    # and the weather icon along the bottom
+    temp = current_temperature
+    now = datetime.now()
+    canvas.Clear()
+    time_str = now.strftime("%I:%M" if blink_on else "%I %M")
+    time_width = sum(clock_font.CharacterWidth(ord(c)) for c in time_str)
+    graphics.DrawText(canvas, clock_font, (options.cols - time_width) // 2, 16, default_color, time_str)
+    graphics.DrawText(canvas, date_font, 2, 30, date_color, f"{now:%b} {now.day}")
+    temp_color = get_temp_color(temp)
+    graphics.DrawText(canvas, wait_time_font, 34, 30, temp_color, f"{temp:.0f}")
+    if temp < 100:
+        graphics.DrawText(canvas, arrival_time_font, 47, 27, temp_color, "°")
+        draw_weather_icon(ShiftedCanvas(canvas, 32), now, is_daytime(now), blink_on)
+    return canvas
+
+
 def draw_clock_left(canvas, blink_on):
     temp = current_temperature
     now = datetime.now()
@@ -1659,12 +1697,7 @@ def draw_clock_left(canvas, blink_on):
     if (temp < 100):
         graphics.DrawText(canvas, wait_time_font, 2, 30, temp_color, f"{temp:.0f}")
         graphics.DrawText(canvas, arrival_time_font, 15, 27, temp_color, "°")
-        # If rain is on the way but it isn't raining yet, alternate the icon with an umbrella every 2s
-        raining_now = weather_code < 700 and weather_code != 0
-        if rain_expected and not raining_now and (now.second // 2) % 2 == 1:
-            draw_umbrella(canvas)
-        else:
-            draw_weather(canvas, is_day, not blink_on)
+        draw_weather_icon(canvas, now, is_day, blink_on)
     else:
         graphics.DrawText(canvas, wait_time_font, 5, 30, temp_color, f"{temp:.0f}")
         graphics.DrawText(canvas, arrival_time_font, 24, 27, temp_color, "°")
@@ -1887,10 +1920,12 @@ try:
         stale = bus_data_is_stale()
         offscreen_canvas.brightness = brightness
         offscreen_canvas.Clear()
-        # Normal mode: clock on the left, buses on the right
-        draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
+        # Normal mode: clock on the left and buses on the right, or a full-screen clock with no buses
         if has_buses:
+            draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
             draw_bus(offscreen_canvas, bus_screen, elapsed, 32)
+        else:
+            draw_clock_full(offscreen_canvas, datetime.now().second % 2 == 0)
         if stale:
             draw_stale_dot(offscreen_canvas, 32)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
