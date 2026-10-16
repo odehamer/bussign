@@ -84,6 +84,7 @@
   .mode input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .mode-name { display: block; font-weight: 600; }
   .mode-desc { display: block; font-size: 13px; color: var(--muted); }
+  .mode-now { display: block; margin-top: 2px; color: var(--accent); }
 
   .tabs {
     display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
@@ -167,6 +168,10 @@
             <input type="radio" name="mode" value="sports">
             <span><span class="mode-name">Sports</span><span class="mode-desc">This week's football games, on a loop</span></span>
           </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="auto">
+            <span><span class="mode-name">Auto</span><span class="mode-desc">Music while Spotify plays, sports during live games, otherwise normal<span class="mode-now" id="auto-now"></span></span></span>
+          </label>
         </fieldset>
         <div class="status" id="mode-status" role="status" aria-live="polite"></div>
       </section>
@@ -233,8 +238,12 @@
   const modeInputs = () => document.querySelectorAll('#modes input[name="mode"]');
   let modeSaving = false;
 
-  function showMode(mode) {
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports" };
+
+  function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
+    // In auto, say which mode is on screen right now
+    $("auto-now").textContent = mode === "auto" && MODE_NAMES[activeMode] ? `Showing ${MODE_NAMES[activeMode]} now` : "";
   }
 
   async function loadMode() {
@@ -244,7 +253,7 @@
       $("pin-section").hidden = true;
       $("app").hidden = false;
       settingValues = data.values;
-      showMode(data.values.display_mode);
+      showMode(data.values.display_mode, data.active_mode);
     } catch (e) {
       if (e.message !== "PIN required") $("mode-status").textContent = "Can't reach the sign";
     }
@@ -262,6 +271,7 @@
         settingValues = data.values;
         $("mode-status").textContent = "";
         updateLive();
+        setTimeout(loadMode, 1500);  // pick up what auto chose
       } catch (e) {
         showMode(previous);
         $("mode-status").textContent = e.message;

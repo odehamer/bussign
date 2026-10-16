@@ -8,7 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MAX_BODY_BYTES = 2048
 
 
-def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png):
+def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
+                 get_active_mode):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -45,7 +46,9 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 self.wfile.write(body)
             elif self.path == "/api/settings":
                 if self.authorized():
-                    self.send_json(200, {"values": get_settings(), "fields": settings_fields})
+                    # active_mode is what's on screen, which differs from the chosen mode in auto
+                    self.send_json(200, {"values": get_settings(), "fields": settings_fields,
+                                         "active_mode": get_active_mode()})
             elif self.path == "/api/screen.png":
                 # What's on the sign right now, as a 64x32 PNG
                 if self.authorized():

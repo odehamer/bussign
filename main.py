@@ -51,8 +51,11 @@ FRAME_INTERVAL = 0.115625  # seconds per scroll pixel
 ARRIVAL_PAUSE = 0.25
 ARRIVAL_SECONDS = 6
 
-# Spotify is only used in music mode
+# Spotify is only used in music mode (and auto mode, to notice a song starting)
 SPOTIFY_POLL_SECONDS = 10
+# Auto mode: music while Spotify plays (kept this long after it stops, so it doesn't flicker
+# between songs), sports while an NFL game is live, otherwise normal
+AUTO_MUSIC_LINGER = 60
 
 # Music mode: album art on the right, song title and artist on the left. Text too wide for the
 # left half holds for MUSIC_SCROLL_PAUSE seconds, then scrolls in a loop.
@@ -132,12 +135,15 @@ NFL_TEAMS = [
 ]
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
-     "options": [["normal", "Clock, buses & sports"], ["music", "Music only"], ["sports", "Football scores"]]},
+     "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
+                 ["auto", "Auto"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
     {"key": "screen_off_start", "section": "Screen", "label": "Screen off at", "type": "hour"},
     {"key": "screen_off_end", "section": "Screen", "label": "Screen back on at", "type": "hour"},
+    {"key": "auto_sports", "section": "Football", "label": "Auto mode shows sports for", "type": "choice",
+     "options": [["any", "Any live NFL game"], ["favorite", "Favorite team's games"], ["never", "Never"]]},
     {"key": "fantasy_enabled", "section": "Football", "label": "Fantasy matchups in sports mode", "type": "toggle"},
     {"key": "sleeper_username", "section": "Football", "label": "Sleeper username", "type": "text",
      "max_length": 40, "placeholder": "Sleeper username"},
@@ -154,6 +160,7 @@ DEFAULT_SETTINGS = {
     "screen_off_start": SCREEN_OFF_START_HOUR,
     "screen_off_end": SCREEN_OFF_END_HOUR,
     "fantasy_enabled": True,
+    "auto_sports": "any",
     "sleeper_username": SLEEPER_USERNAME,
     "favorite_team": FAVORITE_TEAM,
     "touchdown_alerts": "favorite" if TD_ALERTS_FAVORITE_ONLY else "all",
@@ -234,12 +241,30 @@ def update_settings(changes):
         reset_fantasy()
     if "display_mode" in changes or "fantasy_enabled" in changes or "sleeper_username" in changes:
         nfl_week_wakeup.set()
-    if "display_mode" in changes:
+    if "display_mode" in changes or "auto_sports" in changes:
         spotify_wakeup.set()
     return dict(new_settings), None
 
 
 settings = load_settings()
+
+
+spotify_last_playing = float("-inf")  # time.monotonic() when Spotify last reported a song playing
+
+
+def current_mode():
+    # The mode on screen: the chosen one, or for auto, whichever fits right now
+    mode = settings["display_mode"]
+    if mode != "auto":
+        return mode
+    if spotify_album_art is not None and time.monotonic() - spotify_last_playing < AUTO_MUSIC_LINGER:
+        return "music"
+    sports_for = settings["auto_sports"]
+    if sports_for == "any" and nfl_has_live:
+        return "sports"
+    if sports_for == "favorite" and any(g["state"] == "in" and is_favorite(g) for g in nfl_games):
+        return "sports"
+    return "normal"
 
 
 def is_favorite(game):
@@ -641,7 +666,7 @@ def touchdown_try_done(play, points_added):
 
 def queue_touchdown_alert(game, play):
     # Touchdown alerts only show in sports mode; in other modes the play is just marked as seen
-    if settings["display_mode"] != "sports":
+    if current_mode() != "sports":
         return
     abbr = (play.get("team") or {}).get("abbreviation", "")
     teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
@@ -921,7 +946,7 @@ def nfl_week_loop():
     # Loaded once at startup so switching to sports mode is instant, then refreshed while sports mode
     # is on: every minute during live games, otherwise every 10
     while True:
-        sports = settings["display_mode"] == "sports"
+        sports = current_mode() == "sports"
         refresh_seconds = NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS
         week_age = time.monotonic() - nfl_week_fetched_at
         if week_age == float("inf") or (sports and week_age >= refresh_seconds):
@@ -1274,11 +1299,12 @@ def clear_spotify_now_playing():
 
 
 def spotify_active():
-    # Spotify is only checked while the sign is in music mode
-    return settings["display_mode"] == "music"
+    # Spotify is only checked in music mode, and in auto mode to notice when a song starts
+    return settings["display_mode"] in ("music", "auto")
 
 
 def fetch_spotify_now_playing():
+    global spotify_last_playing
     global spotify_album_art
     global spotify_album_art_url
     global spotify_is_playing
@@ -1336,6 +1362,8 @@ def fetch_spotify_now_playing():
         spotify_duration_ms = int(item.get("duration_ms") or 0)
         spotify_progress_at = time.monotonic()
         spotify_is_playing = bool(data.get("is_playing"))
+        if spotify_is_playing:
+            spotify_last_playing = time.monotonic()
         log_ok("Spotify playback")
     except Exception as e:
         log_error("Spotify playback", e)
@@ -1737,7 +1765,7 @@ schedule_nfl_update()
 threading.Thread(target=nfl_week_loop, name="nfl-week", daemon=True).start()
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
-                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png)
+                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page
@@ -1745,6 +1773,7 @@ except Exception as e:
 td_alert = None
 td_alert_start = 0.0
 music_track = None
+auto_showing = None
 sports_ticker = None
 sports_ticker_user = None
 sports_start = 0.0
@@ -1757,7 +1786,11 @@ has_buses = bool(arrival_times)
 try:
     while True:
         art = spotify_album_art
-        music_mode = settings["display_mode"] == "music"
+        mode = current_mode()
+        if settings["display_mode"] == "auto" and mode != auto_showing:
+            print(f"Auto mode: showing {mode}")
+            auto_showing = mode
+        music_mode = mode == "music"
 
         # In music mode, a song playing keeps the screen on overnight (dimmed)
         brightness = get_brightness(music_mode and spotify_is_playing and art is not None)
@@ -1768,7 +1801,7 @@ try:
             continue
 
         # Touchdowns (sports mode) interrupt right away
-        if td_alert is None and nfl_td_alerts and settings["display_mode"] == "sports":
+        if td_alert is None and nfl_td_alerts and mode == "sports":
             alert = next_td_alert()
             if alert is not None:
                 td_alert = build_td_alert(alert)
@@ -1788,7 +1821,7 @@ try:
         # yet it falls through to the normal screens.
         week_games = nfl_week_games
         matchups = fantasy_matchups if settings["fantasy_enabled"] else []
-        if settings["display_mode"] == "sports" and (week_games or matchups):
+        if mode == "sports" and (week_games or matchups):
             now = time.monotonic()
             if sports_ticker_user != settings["sleeper_username"]:
                 sports_ticker, sports_ticker_user = None, settings["sleeper_username"]
