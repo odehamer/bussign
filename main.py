@@ -322,6 +322,7 @@ nfl_score_color = graphics.Color(255, 255, 255)
 nfl_loser_score_color = graphics.Color(120, 120, 120)
 nfl_status_color = graphics.Color(43, 224, 227)
 gold_color = graphics.Color(255, 190, 0)
+record_color = graphics.Color(165, 165, 165)  # team records under the logos and pictures
 nfl_separator_color = (70, 70, 70)
 date_color = graphics.Color(43, 224, 227)
 
@@ -581,10 +582,18 @@ def parse_nfl_games(data, include_upcoming=False):
             kickoff = datetime.fromisoformat(event["date"].replace("Z", "+00:00")).astimezone()
             status_text = f"{kickoff:%a} {kickoff.hour % 12 or 12}:{kickoff:%M}".upper()
         game = {"id": event.get("id"), "state": state, "status": status_text}
+        # Live games: which team has the ball (ESPN gives its team id) and whether it's in the red zone
+        situation = competition.get("situation") or {}
+        game["possession"] = next((side for side in ("away", "home")
+                                   if str((sides[side].get("team") or {}).get("id")) == str(situation.get("possession"))), None)
+        game["red_zone"] = bool(situation.get("isRedZone"))
         for side in ("away", "home"):
             competitor = sides[side]
             team = competitor.get("team", {})
+            overall = next((r.get("summary") for r in competitor.get("records") or []
+                            if r.get("type") == "total" or r.get("name") == "overall"), "")
             game[side] = {
+                "record": overall or "",
                 "abbr": team.get("abbreviation", "?"),
                 "score": competitor.get("score", "0"),
                 "winner": bool(competitor.get("winner")),
@@ -807,8 +816,11 @@ def load_fantasy_leagues(season):
         mine = next((r for r in rosters if r.get("owner_id") == fantasy_user_id), None)
         if mine is None:
             continue
-        names, pictures = {}, {}
+        names, pictures, records = {}, {}, {}
         for roster in rosters:
+            stats = roster.get("settings") or {}
+            wins, losses, ties = stats.get("wins") or 0, stats.get("losses") or 0, stats.get("ties") or 0
+            records[roster.get("roster_id")] = f"{wins}-{losses}" + (f"-{ties}" if ties else "")
             owner = users.get(roster.get("owner_id")) or {}
             metadata = owner.get("metadata") or {}
             names[roster.get("roster_id")] = (metadata.get("team_name") or owner.get("display_name")
@@ -817,7 +829,8 @@ def load_fantasy_leagues(season):
             pictures[roster.get("roster_id")] = metadata.get("avatar") or (
                 f"https://sleepercdn.com/avatars/thumbs/{owner['avatar']}" if owner.get("avatar") else "")
         leagues.append({"id": league_id, "name": league.get("name") or "League",
-                        "roster_id": mine.get("roster_id"), "names": names, "pictures": pictures})
+                        "roster_id": mine.get("roster_id"), "names": names, "pictures": pictures,
+                        "records": records})
     return leagues
 
 
@@ -887,6 +900,8 @@ def get_fantasy_matchups():
                 "opponent_points": float(opponent.get("points") or 0) if opponent else None,
                 "my_picture": league["pictures"].get(me.get("roster_id"), ""),
                 "opponent_picture": league["pictures"].get(opponent.get("roster_id"), "") if opponent else "",
+                "my_record": league["records"].get(me.get("roster_id"), ""),
+                "opponent_record": league["records"].get(opponent.get("roster_id"), "") if opponent else "",
             })
         load_missing_fantasy_pictures(matchups)
         if username != settings["sleeper_username"]:
@@ -960,15 +975,23 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
                              "font": font, "y": NFL_SCORE_BASELINE})
         x += width
 
-    def add_team(team):
-        # Logo only; fall back to the abbreviation if the logo couldn't be downloaded
+    def add_team(game, side):
+        # Logo with the team's record underneath and a possession marker above (live games);
+        # falls back to the abbreviation if the logo couldn't be downloaded
         nonlocal x
+        team = game[side]
         logo = nfl_logos.get(team["abbr"])
         if logo is None:
             add_text(team["abbr"], graphics.Color(*team["color"]))
             add_text(" ")
             return
         segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "image", "image": logo})
+        if team["record"]:
+            record_width = text_width(team["record"], bus_number_font)
+            segments.append({"x": x + (NFL_LOGO_SIZE - record_width) // 2, "width": record_width, "kind": "text",
+                             "text": team["record"], "color": record_color, "font": bus_number_font,
+                             "y": options.rows - 1})
+        segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "possession", "game_id": game["id"], "side": side})
         x += NFL_LOGO_SIZE + NFL_LOGO_GAP
 
     def add_separator():
@@ -986,17 +1009,17 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
         game_start = x
         if game["state"] == "pre":
             # Not started: away logo @ home logo, kickoff time above
-            add_team(game["away"])
+            add_team(game, "away")
             x += NFL_UPCOMING_GAP - NFL_LOGO_GAP
             segments.append({"x": x, "width": text_width("@", nfl_status_font), "kind": "text", "text": "@",
                              "color": nfl_loser_score_color, "font": nfl_status_font, "y": NFL_SCORE_BASELINE - 3})
             x += text_width("@", nfl_status_font) + NFL_UPCOMING_GAP
-            add_team(game["home"])
+            add_team(game, "home")
             x -= NFL_LOGO_GAP
         else:
             for i, side in enumerate(("away", "home")):
                 team = game[side]
-                add_team(team)
+                add_team(game, side)
                 losing = game["state"] == "post" and not team["winner"]
                 add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
                 if i == 0:
@@ -1028,14 +1051,26 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
                              "color": gold_color, "font": nfl_status_font, "y": NFL_STATUS_BASELINE,
                              "stop": len(stops)})
             mine, theirs = matchup["my_points"], matchup["opponent_points"]
-            sides = [(matchup["my_picture"], mine, theirs is None or mine >= theirs),
-                     (matchup["opponent_picture"], theirs, theirs is not None and theirs >= mine)]
-            for i, (url, points, leading) in enumerate(sides):
+            sides = [(matchup["my_picture"], mine, theirs is None or mine >= theirs, matchup["my_record"]),
+                     (matchup["opponent_picture"], theirs, theirs is not None and theirs >= mine,
+                      matchup["opponent_record"])]
+            for i, (url, points, leading, record) in enumerate(sides):
                 column_start = card_start + i * column
                 picture = fantasy_pictures.get(url)
+                # Picture on the left of the column with the season record beside it
+                record_width = text_width(record, bus_number_font)
+                if record_width > column - FANTASY_PICTURE_SIZE - 1:
+                    record = "-".join(record.split("-")[:2])  # drop ties if they don't fit
+                    record_width = text_width(record, bus_number_font)
+                block_width = FANTASY_PICTURE_SIZE + (1 + record_width if record else 0)
+                block_start = column_start + (column - block_width) // 2
                 if picture is not None:
-                    segments.append({"x": column_start + (column - FANTASY_PICTURE_SIZE) // 2,
-                                     "width": FANTASY_PICTURE_SIZE, "kind": "image", "image": picture, "y": 9})
+                    segments.append({"x": block_start, "width": FANTASY_PICTURE_SIZE, "kind": "image",
+                                     "image": picture, "y": 9})
+                if record:
+                    segments.append({"x": block_start + FANTASY_PICTURE_SIZE + 1, "width": record_width,
+                                      "kind": "text", "text": record, "color": record_color,
+                                      "font": bus_number_font, "y": 18})
                 score = "BYE" if points is None else f"{points:.1f}"
                 score_width = text_width(score, arrival_time_font)
                 segments.append({"x": column_start + (column - score_width) // 2, "width": score_width,
@@ -1090,11 +1125,25 @@ def draw_clipped_marquee(canvas, segment, left, elapsed):
             char_x += char_width
 
 
+def draw_possession_marker(canvas, segment, left, live_games):
+    # A short bar above the logo of the team with the ball: white, or red in the red zone. Read from
+    # the latest scores every frame, so it doesn't wait for the ticker to loop around.
+    game = live_games.get(segment["game_id"])
+    if not game or game["possession"] != segment["side"]:
+        return
+    color = (220, 30, 50) if game["red_zone"] else (255, 255, 255)
+    center = left + NFL_LOGO_SIZE // 2
+    for x in range(center - 3, center + 3):
+        for y in (8, 9):
+            canvas.SetPixel(x, y, *color)
+
+
 def draw_nfl_ticker(canvas, ticker, elapsed):
     # Returns False once everything has scrolled fully off the left edge
     offset = options.cols - int(get_nfl_ticker_scroll(ticker, elapsed))
     if offset + ticker["width"] < 0:
         return False
+    live_games = {g["id"]: g for g in nfl_week_games if g["state"] == "in"}
     for segment in ticker["segments"]:
         left = offset + segment["x"]
         # Only draw segments that are at least partly on screen
@@ -1109,9 +1158,11 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
         elif segment["kind"] == "line" and left >= 0:
             for y in range(3, options.rows - 3):
                 canvas.SetPixel(left, y, *nfl_separator_color)
+        elif segment["kind"] == "possession":
+            draw_possession_marker(canvas, segment, left, live_games)
         elif segment["kind"] == "underline":
             for x in range(max(0, left), min(options.cols, left + segment["width"])):
-                canvas.SetPixel(x, options.rows - 2, *segment["color"])
+                canvas.SetPixel(x, options.rows - 1, *segment["color"])
     return True
 
 
