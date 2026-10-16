@@ -90,6 +90,11 @@ NFL_SINGLE_GAME_PAUSE = 10.0 # hold this long when the ticker only has one game 
 # Sports mode: loops through all of this week's games (finished, live and upcoming)
 SPORTS_GAME_SECONDS = 4.0    # hold on each game (the favorite team's game holds 1.5x as long)
 SPORTS_CHECK_SECONDS = 15    # how often the week's scores are checked for being out of date
+# Sleeper fantasy matchups, shown after the NFL games in sports mode
+SLEEPER_USERNAME = "odehamer"
+SLEEPER_API = "https://api.sleeper.app/v1/"
+FANTASY_SECONDS = 6.0           # time on each matchup
+FANTASY_LEAGUE_CACHE = 6 * 3600 # re-read league names, rosters and team names this often
 NFL_UPCOMING_GAP = 12        # space either side of the "@" so upcoming games are as wide as played ones
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores when nothing is happening
@@ -155,6 +160,7 @@ SETTINGS_FIELDS = [
     {"key": "screen_off_end", "section": "Screen", "label": "Screen back on at", "type": "hour"},
     {"key": "spotify_enabled", "section": "Features", "label": "Show album art while Spotify plays", "type": "toggle"},
     {"key": "nfl_ticker_enabled", "section": "Football", "label": "NFL scores ticker on game days", "type": "toggle"},
+    {"key": "fantasy_enabled", "section": "Football", "label": "Fantasy matchups in sports mode", "type": "toggle"},
     {"key": "favorite_team", "section": "Football", "label": "Favorite team", "type": "choice",
      "options": [["", "None"]] + [list(team) for team in NFL_TEAMS]},
     {"key": "touchdown_alerts", "section": "Football", "label": "Touchdown alerts", "type": "choice",
@@ -169,6 +175,7 @@ DEFAULT_SETTINGS = {
     "screen_off_end": SCREEN_OFF_END_HOUR,
     "spotify_enabled": True,
     "nfl_ticker_enabled": True,
+    "fantasy_enabled": True,
     "favorite_team": FAVORITE_TEAM,
     "touchdown_alerts": "favorite" if TD_ALERTS_FAVORITE_ONLY else "all",
 }
@@ -237,7 +244,7 @@ def update_settings(changes):
             print(f"Couldn't save settings (still applied until restart): {e}")
         settings = new_settings
     print("Settings changed: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
-    if "display_mode" in changes:
+    if "display_mode" in changes or "fantasy_enabled" in changes:
         nfl_week_wakeup.set()
     return dict(new_settings), None
 
@@ -277,6 +284,11 @@ nfl_week_games = []  # this week's games for sports mode, including ones that ha
 nfl_week_has_live = False
 nfl_week_fetched_at = float("-inf")
 nfl_week_summary = ""
+fantasy_matchups = []  # this week's Sleeper matchups for SLEEPER_USERNAME, see get_fantasy_matchups
+fantasy_fetched_at = float("-inf")
+fantasy_summary = ""
+fantasy_user_id = None
+fantasy_leagues = {"fetched_at": float("-inf"), "season": None, "leagues": []}
 nfl_week_wakeup = threading.Event()  # set when the display mode changes, so sports mode loads right away
 # Per game: total points when first seen (older plays are never alerted), total covered by the
 # last summary fetch, and scoring play ids already handled
@@ -785,13 +797,82 @@ def get_nfl_week():
         log_error("NFL week", e)
 
 
+def sleeper_get(path):
+    response = requests.get(SLEEPER_API + path, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def load_fantasy_leagues(season):
+    # League names, which roster is ours (owner or co-owner) and every team's name. Cached because
+    # these barely change during a week.
+    leagues = []
+    for league in sleeper_get(f"user/{fantasy_user_id}/leagues/nfl/{season}") or []:
+        league_id = league.get("league_id")
+        rosters = sleeper_get(f"league/{league_id}/rosters") or []
+        users = {u.get("user_id"): u for u in sleeper_get(f"league/{league_id}/users") or []}
+        mine = next((r for r in rosters if r.get("owner_id") == fantasy_user_id
+                     or fantasy_user_id in (r.get("co_owners") or [])), None)
+        if mine is None:
+            continue
+        names = {}
+        for roster in rosters:
+            owner = users.get(roster.get("owner_id")) or {}
+            names[roster.get("roster_id")] = ((owner.get("metadata") or {}).get("team_name")
+                                              or owner.get("display_name") or f"Team {roster.get('roster_id')}")
+        leagues.append({"id": league_id, "name": league.get("name") or "League",
+                        "roster_id": mine.get("roster_id"), "names": names})
+    return leagues
+
+
+def get_fantasy_matchups():
+    global fantasy_matchups, fantasy_fetched_at, fantasy_summary, fantasy_user_id
+    try:
+        if fantasy_user_id is None:
+            fantasy_user_id = sleeper_get(f"user/{SLEEPER_USERNAME}")["user_id"]
+        state = sleeper_get("state/nfl")
+        season, week = state.get("season"), state.get("display_week") or state.get("week")
+        if (fantasy_leagues["season"] != season
+                or time.monotonic() - fantasy_leagues["fetched_at"] > FANTASY_LEAGUE_CACHE):
+            fantasy_leagues.update(leagues=load_fantasy_leagues(season), season=season,
+                                   fetched_at=time.monotonic())
+        matchups = []
+        for league in fantasy_leagues["leagues"]:
+            teams = sleeper_get(f"league/{league['id']}/matchups/{week}") or []
+            me = next((t for t in teams if t.get("roster_id") == league["roster_id"]), None)
+            if me is None:
+                continue
+            opponent = next((t for t in teams if t.get("matchup_id") is not None
+                             and t.get("matchup_id") == me.get("matchup_id")
+                             and t.get("roster_id") != me.get("roster_id")), None)
+            matchups.append({
+                "league": league["name"],
+                "my_name": league["names"].get(me.get("roster_id"), SLEEPER_USERNAME),
+                "my_points": float(me.get("points") or 0),
+                "opponent_name": league["names"].get(opponent.get("roster_id"), "?") if opponent else "BYE",
+                "opponent_points": float(opponent.get("points") or 0) if opponent else None,
+            })
+        fantasy_matchups = matchups
+        fantasy_fetched_at = time.monotonic()
+        log_ok("Fantasy")
+        summary = f"Fantasy week {week}: {len(matchups)} matchups for {SLEEPER_USERNAME}"
+        if summary != fantasy_summary:
+            print(summary)
+            fantasy_summary = summary
+    except Exception as e:
+        log_error("Fantasy", e)
+
+
 def nfl_week_loop():
     # Only fetched while sports mode is on: every minute during live games, otherwise every 10
     while True:
         if settings["display_mode"] == "sports":
-            age = time.monotonic() - nfl_week_fetched_at
-            if age >= (NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS):
+            refresh_seconds = NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS
+            if time.monotonic() - nfl_week_fetched_at >= refresh_seconds:
                 get_nfl_week()
+            # Fantasy points move with the real games, so they refresh on the same schedule
+            if settings["fantasy_enabled"] and time.monotonic() - fantasy_fetched_at >= refresh_seconds:
+                get_fantasy_matchups()
         nfl_week_wakeup.wait(SPORTS_CHECK_SECONDS)
         nfl_week_wakeup.clear()
 
@@ -1515,6 +1596,46 @@ def draw_marquee(canvas, font, text, y, color, elapsed):
     graphics.DrawText(canvas, font, 1 - shift + loop, y, color, text)
 
 
+def draw_scrolling_text(canvas, font, text, x, y, area_width, color, elapsed):
+    # Like draw_marquee, but anywhere on screen: fits -> drawn once, too wide -> hold, then loop.
+    # Spill past the area isn't cleared here; callers draw over it.
+    width = sum(font.CharacterWidth(ord(c)) for c in text)
+    if width <= area_width:
+        graphics.DrawText(canvas, font, x, y, color, text)
+        return
+    loop = width + MUSIC_SCROLL_GAP
+    period = MUSIC_SCROLL_PAUSE + loop / MUSIC_SCROLL_SPEED
+    shift = int(max(0.0, elapsed % period - MUSIC_SCROLL_PAUSE) * MUSIC_SCROLL_SPEED)
+    graphics.DrawText(canvas, font, x - shift, y, color, text)
+    graphics.DrawText(canvas, font, x - shift + loop, y, color, text)
+
+
+def draw_fantasy_matchup(canvas, matchup, elapsed):
+    # League name across the top, then our team and the opponent with scores on the right.
+    # Our score is green when winning, red when losing.
+    gold = graphics.Color(*MESSAGE_COLORS["gold"])
+    league = to_display_text(matchup["league"]).strip(" -").upper() or "FANTASY"
+    draw_scrolling_text(canvas, nfl_status_font, league, 1, 7, 62, gold, elapsed)
+
+    mine, theirs = matchup["my_points"], matchup["opponent_points"]
+    if theirs is None or mine == theirs:
+        my_color = nfl_score_color
+    else:
+        my_color = graphics.Color(*MESSAGE_COLORS["green"]) if mine > theirs else graphics.Color(*MESSAGE_COLORS["red"])
+    rows = [
+        (to_display_text(matchup["my_name"]) or SLEEPER_USERNAME, nfl_score_color, f"{mine:.1f}", my_color, 18),
+        (to_display_text(matchup["opponent_name"]) or "?", nfl_loser_score_color,
+         "" if theirs is None else f"{theirs:.1f}", nfl_loser_score_color, 29),
+    ]
+    for name, name_color, score, score_color, baseline in rows:
+        score_width = sum(arrival_time_font.CharacterWidth(ord(c)) for c in score)
+        name_area = options.cols - score_width - 6  # names end here, leaving a 3px gap before the score
+        draw_scrolling_text(canvas, nfl_status_font, name, 1, baseline, name_area, name_color, elapsed)
+        # Clear anything the scrolling name drew past its area, then draw the score
+        canvas.FillRect(name_area + 1, baseline - 8, options.cols, baseline + 2)
+        graphics.DrawText(canvas, arrival_time_font, options.cols - score_width - 1, baseline + 1, score_color, score)
+
+
 def draw_music_screen(canvas, art, elapsed):
     # elapsed: seconds since this song started showing (restarts the scrolling for each song)
     title_color = nfl_score_color if spotify_is_playing else nfl_loser_score_color
@@ -1585,6 +1706,8 @@ message_screen = None
 message_start = 0.0
 music_track = None
 sports_ticker = None
+sports_phase = None  # "nfl" while the week's games scroll, "fantasy" while matchups show
+sports_matchups = []
 sports_start = 0.0
 sports_last_frame = 0.0
 music_start = 0.0
@@ -1653,26 +1776,44 @@ try:
             message_screen = None
             cycle_start = 0.0  # force a fresh cycle below
 
-        # Sports mode: loop through this week's games. Touchdowns and messages above still interrupt;
-        # the loop picks up where it left off. With no games loaded it falls through to the normal screens.
+        # Sports mode: loop through this week's games, then our fantasy matchups. Touchdowns and
+        # messages above still interrupt; the loop picks up where it left off. With nothing loaded
+        # yet it falls through to the normal screens.
         week_games = nfl_week_games
-        if settings["display_mode"] == "sports" and week_games:
+        matchups = fantasy_matchups if settings["fantasy_enabled"] else []
+        if settings["display_mode"] == "sports" and (week_games or matchups):
             now = time.monotonic()
-            if sports_ticker is None:
-                sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS)
-                sports_start = now
-            elif now - sports_last_frame > 0.5:
+            if sports_phase is not None and now - sports_last_frame > 0.5:
                 sports_start += now - sports_last_frame  # resume after an interruption
             sports_last_frame = now
+            if sports_phase is None:
+                if week_games:
+                    sports_phase = "nfl"
+                    sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS)
+                else:
+                    sports_phase, sports_matchups = "fantasy", list(matchups)
+                sports_start = now
             offscreen_canvas.brightness = brightness
             offscreen_canvas.Clear()
-            if not draw_nfl_ticker(offscreen_canvas, sports_ticker, now - sports_start):
-                sports_ticker = None  # finished a loop: rebuild next frame with the latest scores
+            if sports_phase == "nfl" and not draw_nfl_ticker(offscreen_canvas, sports_ticker, now - sports_start):
+                # Games done: on to the matchups, or start the next loop with the latest scores
+                sports_ticker = None
+                sports_phase = None
+                if matchups:
+                    sports_phase, sports_matchups, sports_start = "fantasy", list(matchups), now
+            if sports_phase == "fantasy":
+                index = int((now - sports_start) // FANTASY_SECONDS)
+                if index < len(sports_matchups):
+                    draw_fantasy_matchup(offscreen_canvas, sports_matchups[index],
+                                         now - sports_start - index * FANTASY_SECONDS)
+                else:
+                    sports_phase = None  # start over with the NFL games
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
             time.sleep(NFL_TICKER_FRAME)
             cycle_start = 0.0  # start a fresh cycle if sports mode ends
             continue
         sports_ticker = None
+        sports_phase = None
 
         # Music mode: song title and artist on the left, album art on the right. With nothing
         # loaded in Spotify it falls through to the normal clock and bus screens.
