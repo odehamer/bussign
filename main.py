@@ -87,6 +87,10 @@ NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
 NFL_TICKER_SPEED = 40        # pixels per second
 NFL_TICKER_PAUSE = 1.0       # seconds to hold on each game once it's centered
 NFL_SINGLE_GAME_PAUSE = 10.0 # hold this long when the ticker only has one game (e.g. Thursday night)
+# Sports mode: loops through all of this week's games (finished, live and upcoming)
+SPORTS_GAME_SECONDS = 4.0    # hold on each game (the favorite team's game holds 1.5x as long)
+SPORTS_CHECK_SECONDS = 15    # how often the week's scores are checked for being out of date
+NFL_UPCOMING_GAP = 12        # space either side of the "@" so upcoming games are as wide as played ones
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores when nothing is happening
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress or about to kick off
@@ -143,7 +147,7 @@ NFL_TEAMS = [
 ]
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
-     "options": [["normal", "Clock, buses & sports"], ["music", "Music only"]]},
+     "options": [["normal", "Clock, buses & sports"], ["music", "Music only"], ["sports", "Football scores"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
@@ -233,6 +237,8 @@ def update_settings(changes):
             print(f"Couldn't save settings (still applied until restart): {e}")
         settings = new_settings
     print("Settings changed: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+    if "display_mode" in changes:
+        nfl_week_wakeup.set()
     return dict(new_settings), None
 
 
@@ -267,6 +273,11 @@ nfl_has_live = False
 nfl_games_day = ""  # YYYYMMDD that nfl_games belong to
 nfl_next_kickoff = None  # UTC datetime of today's next game that hasn't started
 nfl_last_summary = ""  # last logged NFL status, so unchanged refreshes stay quiet
+nfl_week_games = []  # this week's games for sports mode, including ones that haven't started
+nfl_week_has_live = False
+nfl_week_fetched_at = float("-inf")
+nfl_week_summary = ""
+nfl_week_wakeup = threading.Event()  # set when the display mode changes, so sports mode loads right away
 # Per game: total points when first seen (older plays are never alerted), total covered by the
 # last summary fetch, and scoring play ids already handled
 nfl_score_tracking = {}
@@ -548,13 +559,13 @@ def get_team_color(team):
     return rgb
 
 
-def parse_nfl_games(data):
+def parse_nfl_games(data, include_upcoming=False):
     games = []
     for event in data.get("events", []):
         status = event.get("status", {}).get("type", {})
         state = status.get("state")
-        # pre = not started yet; only show games in progress or finished
-        if state not in ("in", "post"):
+        # pre = not started yet; the ticker only shows games in progress or finished
+        if state not in ("in", "post") and not (include_upcoming and state == "pre"):
             continue
         competition = (event.get("competitions") or [{}])[0]
         sides = {c.get("homeAway"): c for c in competition.get("competitors", [])}
@@ -562,6 +573,10 @@ def parse_nfl_games(data):
             continue
         # Shown in small text above the scores: "FINAL", "FINAL/OT", "8:42 3RD", "HALFTIME"
         status_text = (status.get("shortDetail") or "").upper().replace(" - ", " ")
+        if state == "pre" and event.get("date"):
+            # Upcoming: kickoff day and local time, e.g. "SUN 10:00"
+            kickoff = datetime.fromisoformat(event["date"].replace("Z", "+00:00")).astimezone()
+            status_text = f"{kickoff:%a} {kickoff.hour % 12 or 12}:{kickoff:%M}".upper()
         game = {"id": event.get("id"), "state": state, "status": status_text}
         for side in ("away", "home"):
             competitor = sides[side]
@@ -747,6 +762,40 @@ def get_nfl_scores():
         # Keep the last known scores on error
 
 
+def get_nfl_week():
+    # The scoreboard without a date is the current week: Thursday through Monday night
+    global nfl_week_games, nfl_week_has_live, nfl_week_fetched_at, nfl_week_summary
+    try:
+        response = requests.get(NFL_SCOREBOARD_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        games = parse_nfl_games(data, include_upcoming=True)
+        load_missing_nfl_logos(games)
+        nfl_week_games = games
+        nfl_week_has_live = any(g["state"] == "in" for g in games)
+        nfl_week_fetched_at = time.monotonic()
+        log_ok("NFL week")
+        counts = {state: sum(1 for g in games if g["state"] == state) for state in ("post", "in", "pre")}
+        summary = (f"NFL week {data.get('week', {}).get('number', '?')}: {counts['post']} final, "
+                   f"{counts['in']} live, {counts['pre']} upcoming")
+        if summary != nfl_week_summary:
+            print(summary)
+            nfl_week_summary = summary
+    except Exception as e:
+        log_error("NFL week", e)
+
+
+def nfl_week_loop():
+    # Only fetched while sports mode is on: every minute during live games, otherwise every 10
+    while True:
+        if settings["display_mode"] == "sports":
+            age = time.monotonic() - nfl_week_fetched_at
+            if age >= (NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS):
+                get_nfl_week()
+        nfl_week_wakeup.wait(SPORTS_CHECK_SECONDS)
+        nfl_week_wakeup.clear()
+
+
 def get_nfl_poll_seconds():
     # Refresh every minute while a game is on or one is about to start (kickoffs often run late)
     if nfl_has_live:
@@ -786,7 +835,7 @@ def get_nfl_game_pause(game, game_count):
     return NFL_FAVORITE_PAUSE if is_favorite(game) else NFL_TICKER_PAUSE
 
 
-def build_nfl_ticker(games):
+def build_nfl_ticker(games, hold_seconds=None):
     # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
     segments = []
     x = 0
@@ -825,13 +874,23 @@ def build_nfl_ticker(games):
     for game in sorted(games, key=lambda g: not is_favorite(g)):
         add_separator()
         game_start = x
-        for i, side in enumerate(("away", "home")):
-            team = game[side]
-            add_team(team)
-            losing = game["state"] == "post" and not team["winner"]
-            add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
-            if i == 0:
-                x += NFL_TEAM_GAP
+        if game["state"] == "pre":
+            # Not started: away logo @ home logo, kickoff time above
+            add_team(game["away"])
+            x += NFL_UPCOMING_GAP - NFL_LOGO_GAP
+            segments.append({"x": x, "width": text_width("@", nfl_status_font), "kind": "text", "text": "@",
+                             "color": nfl_loser_score_color, "font": nfl_status_font, "y": NFL_SCORE_BASELINE - 3})
+            x += text_width("@", nfl_status_font) + NFL_UPCOMING_GAP
+            add_team(game["home"])
+            x -= NFL_LOGO_GAP
+        else:
+            for i, side in enumerate(("away", "home")):
+                team = game[side]
+                add_team(team)
+                losing = game["state"] == "post" and not team["winner"]
+                add_text(team["score"], nfl_loser_score_color if losing else nfl_score_color)
+                if i == 0:
+                    x += NFL_TEAM_GAP
         # Status ("F", "8:42 3RD", "HALFTIME") in small text centered above the game
         status_width = text_width(game["status"], nfl_status_font)
         segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
@@ -843,8 +902,11 @@ def build_nfl_ticker(games):
             segments.append({"x": game_start, "width": x - game_start, "kind": "underline",
                              "color": favorite["color"]})
         # Scroll distance at which this game sits centered on screen, and how long to hold there
-        stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2,
-                      get_nfl_game_pause(game, len(games))))
+        if hold_seconds is None:
+            hold = get_nfl_game_pause(game, len(games))
+        else:
+            hold = hold_seconds * (1.5 if is_favorite(game) else 1)
+        stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2, hold))
     return {"segments": segments, "width": x, "stops": stops}
 
 
@@ -1506,6 +1568,7 @@ schedule_bus_update()
 
 STARTED_AT = time.monotonic()
 schedule_nfl_update()
+threading.Thread(target=nfl_week_loop, name="nfl-week", daemon=True).start()
 try:
     web.start_server(WEB_PORT, WEB_PIN, MESSAGE_COLORS, add_message, list_messages, delete_message,
                      os.path.join(APP_DIR, "web", "index.html"),
@@ -1521,6 +1584,9 @@ td_alert_start = 0.0
 message_screen = None
 message_start = 0.0
 music_track = None
+sports_ticker = None
+sports_start = 0.0
+sports_last_frame = 0.0
 music_start = 0.0
 next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
@@ -1586,6 +1652,27 @@ try:
             finish_message(message_screen["id"])
             message_screen = None
             cycle_start = 0.0  # force a fresh cycle below
+
+        # Sports mode: loop through this week's games. Touchdowns and messages above still interrupt;
+        # the loop picks up where it left off. With no games loaded it falls through to the normal screens.
+        week_games = nfl_week_games
+        if settings["display_mode"] == "sports" and week_games:
+            now = time.monotonic()
+            if sports_ticker is None:
+                sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS)
+                sports_start = now
+            elif now - sports_last_frame > 0.5:
+                sports_start += now - sports_last_frame  # resume after an interruption
+            sports_last_frame = now
+            offscreen_canvas.brightness = brightness
+            offscreen_canvas.Clear()
+            if not draw_nfl_ticker(offscreen_canvas, sports_ticker, now - sports_start):
+                sports_ticker = None  # finished a loop: rebuild next frame with the latest scores
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(NFL_TICKER_FRAME)
+            cycle_start = 0.0  # start a fresh cycle if sports mode ends
+            continue
+        sports_ticker = None
 
         # Music mode: song title and artist on the left, album art on the right. With nothing
         # loaded in Spotify it falls through to the normal clock and bus screens.
