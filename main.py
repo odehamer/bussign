@@ -164,7 +164,7 @@ SETTINGS_FIELDS = [
     {"key": "fantasy_enabled", "section": "Football", "label": "Fantasy matchups in sports mode", "type": "toggle"},
     {"key": "favorite_team", "section": "Football", "label": "Favorite team", "type": "choice",
      "options": [["", "None"]] + [list(team) for team in NFL_TEAMS]},
-    {"key": "touchdown_alerts", "section": "Football", "label": "Touchdown alerts", "type": "choice",
+    {"key": "touchdown_alerts", "section": "Football", "label": "Touchdown alerts (sports mode)", "type": "choice",
      "options": [["all", "All teams"], ["favorite", "Favorite team only"], ["off", "Off"]]},
 ]
 DEFAULT_SETTINGS = {
@@ -643,6 +643,9 @@ def touchdown_try_done(play, points_added):
 
 
 def queue_touchdown_alert(game, play):
+    # Touchdown alerts only show in sports mode; in other modes the play is just marked as seen
+    if settings["display_mode"] != "sports":
+        return
     abbr = (play.get("team") or {}).get("abbreviation", "")
     teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
     team = teams.get(abbr)
@@ -1798,7 +1801,7 @@ try:
             cycle_start = 0.0  # force a fresh cycle below
 
         # Touchdowns interrupt the clock/bus screens right away (but wait for a running ticker)
-        if td_alert is None and nfl_td_alerts and not music_mode:
+        if td_alert is None and nfl_td_alerts and settings["display_mode"] == "sports":
             alert = next_td_alert()
             if alert is not None:
                 td_alert = build_td_alert(alert)
