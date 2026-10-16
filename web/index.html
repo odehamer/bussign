@@ -110,8 +110,28 @@
   #live { display: block; width: 100%; aspect-ratio: 2 / 1; border-radius: 8px; background: #000; }
   #live.stale { opacity: 0.4; }
 
+  .modes { display: grid; gap: 10px; margin: 0; padding: 0; border: 0; }
+  .mode {
+    display: flex; align-items: center; gap: 14px; padding: 14px; cursor: pointer;
+    background: #0f1115; border: 1px solid var(--panel-edge); border-radius: 12px;
+  }
+  .mode:has(input:checked) { border-color: var(--accent); background: #0f1d1f; }
+  .mode input {
+    appearance: none; -webkit-appearance: none; flex: none; margin: 0; width: 22px; height: 22px;
+    border-radius: 50%; border: 2px solid #4a505a; display: grid; place-content: center; cursor: pointer;
+  }
+  .mode input::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+    transform: scale(0); transition: transform 0.12s;
+  }
+  .mode input:checked { border-color: var(--accent); }
+  .mode input:checked::before { transform: scale(1); }
+  .mode input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .mode-name { display: block; font-weight: 600; }
+  .mode-desc { display: block; font-size: 13px; color: var(--muted); }
+
   .tabs {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
   }
   .tabs button {
@@ -159,20 +179,42 @@
   </section>
 
   <div id="app">
-    <section class="live">
-      <div class="live-header">
-        <h2>On the sign now</h2>
-        <span class="live-state" id="live-state" role="status">Connecting…</span>
-      </div>
-      <canvas id="live" width="640" height="320" role="img" aria-label="Live view of the sign"></canvas>
-    </section>
-
     <div class="tabs" role="tablist">
-      <button type="button" role="tab" id="tab-btn-messages" aria-selected="true" aria-controls="tab-messages">Message</button>
+      <button type="button" role="tab" id="tab-btn-sign" aria-selected="true" aria-controls="tab-sign">Sign</button>
+      <button type="button" role="tab" id="tab-btn-messages" aria-selected="false" aria-controls="tab-messages">Message</button>
       <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
     </div>
 
-    <div id="tab-messages" role="tabpanel" aria-labelledby="tab-btn-messages">
+    <div id="tab-sign" role="tabpanel" aria-labelledby="tab-btn-sign">
+      <section class="live">
+        <div class="live-header">
+          <h2>On the sign now</h2>
+          <span class="live-state" id="live-state" role="status">Connecting…</span>
+        </div>
+        <canvas id="live" width="640" height="320" role="img" aria-label="Live view of the sign"></canvas>
+      </section>
+
+      <section>
+        <h2 id="modes-heading">Mode</h2>
+        <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
+          <label class="mode">
+            <input type="radio" name="mode" value="normal">
+            <span><span class="mode-name">Normal</span><span class="mode-desc">Clock, weather, buses &amp; game-day scores</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="music">
+            <span><span class="mode-name">Music</span><span class="mode-desc">Album cover with the song and artist</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="sports">
+            <span><span class="mode-name">Sports</span><span class="mode-desc">This week's football games, on a loop</span></span>
+          </label>
+        </fieldset>
+        <div class="status" id="mode-status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+
+    <div id="tab-messages" role="tabpanel" aria-labelledby="tab-btn-messages" hidden>
     <section>
       <h2>Send a message</h2>
       <div class="sign" aria-hidden="true"><div class="sign-text fits" id="preview">HELLO</div></div>
@@ -354,14 +396,58 @@
 
   // ---- Tabs ----
   function showTab(name) {
-    ["messages", "settings"].forEach((tab) => {
+    ["sign", "messages", "settings"].forEach((tab) => {
       $("tab-" + tab).hidden = tab !== name;
       $("tab-btn-" + tab).setAttribute("aria-selected", String(tab === name));
     });
     if (name === "settings") loadSettings();
+    if (name === "sign") { loadMode(); updateLive(); }
   }
+  $("tab-btn-sign").addEventListener("click", () => showTab("sign"));
   $("tab-btn-messages").addEventListener("click", () => showTab("messages"));
   $("tab-btn-settings").addEventListener("click", () => showTab("settings"));
+
+  // ---- Mode (radio cards on the Sign tab) ----
+  const modeInputs = () => document.querySelectorAll('#modes input[name="mode"]');
+  let modeSaving = false;
+
+  function showMode(mode) {
+    modeInputs().forEach((input) => { input.checked = input.value === mode; });
+  }
+
+  async function loadMode() {
+    if (modeSaving) return;  // don't overwrite a switch that's still being saved
+    try {
+      const data = await api("GET", "/api/settings");
+      settingValues = data.values;
+      showMode(data.values.display_mode);
+    } catch (e) {
+      if (e.message !== "PIN required") $("mode-status").textContent = "Can't reach the sign";
+    }
+  }
+
+  modeInputs().forEach((input) => {
+    input.addEventListener("change", async () => {
+      const previous = settingValues.display_mode;
+      modeSaving = true;
+      modeInputs().forEach((i) => { i.disabled = true; });
+      $("mode-status").textContent = "Switching…";
+      $("mode-status").classList.remove("error");
+      try {
+        const data = await api("POST", "/api/settings", { display_mode: input.value });
+        settingValues = data.values;
+        $("mode-status").textContent = "";
+        updateLive();
+      } catch (e) {
+        showMode(previous);
+        $("mode-status").textContent = e.message;
+        $("mode-status").classList.add("error");
+      } finally {
+        modeSaving = false;
+        modeInputs().forEach((i) => { i.disabled = false; });
+      }
+    });
+  });
 
   // ---- Settings (rendered from the fields the sign sends) ----
   let settingValues = {};
@@ -404,7 +490,8 @@
     const container = $("settings");
     container.innerHTML = "";
     const sections = {};
-    fields.forEach((field) => {
+    // Display mode has its own controls on the Sign tab
+    fields.filter((field) => field.key !== "display_mode").forEach((field) => {
       if (!sections[field.section]) {
         const section = document.createElement("section");
         const heading = document.createElement("h2");
@@ -499,7 +586,7 @@
   }
 
   async function updateLive() {
-    if (liveBusy || document.hidden || $("app").hidden) return;
+    if (liveBusy || document.hidden || $("app").hidden || $("tab-sign").hidden) return;
     liveBusy = true;
     try {
       const response = await fetch("/api/screen.png", { headers: { "X-Pin": pin }, cache: "no-store" });
@@ -528,8 +615,11 @@
 
   updatePreview();
   refresh();
+  loadMode();
   startLive();
   setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+  // Keep the mode in sync if it's changed from another phone
+  setInterval(() => { if (!document.hidden && !$("tab-sign").hidden) loadMode(); }, 5000);
 </script>
 </body>
 </html>
