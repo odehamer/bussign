@@ -6,6 +6,7 @@ import math
 import io
 import json
 import re
+import unicodedata
 from collections import deque
 from google.protobuf.message import Message
 from google.transit import gtfs_realtime_pb2
@@ -51,6 +52,12 @@ ARRIVAL_SECONDS = 6
 # alternates: clock for SPOTIFY_CLOCK_SECONDS, then one bus cycle
 SPOTIFY_CLOCK_SECONDS = 8
 SPOTIFY_POLL_SECONDS = 10
+
+# Music mode: album art on the right, song title and artist on the left. Text too wide for the
+# left half holds for MUSIC_SCROLL_PAUSE seconds, then scrolls in a loop.
+MUSIC_SCROLL_SPEED = 16  # pixels per second
+MUSIC_SCROLL_PAUSE = 2.0
+MUSIC_SCROLL_GAP = 12    # blank pixels between the end of the text and its repeat
 
 # Brightness (1-100): daytime runs from 30 min before sunrise to 30 min after sunset
 # These are defaults: settings changed on the control page are saved to settings.json and win.
@@ -131,6 +138,8 @@ NFL_TEAMS = [
     ("TEN", "Tennessee Titans"), ("WSH", "Washington Commanders"),
 ]
 SETTINGS_FIELDS = [
+    {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
+     "options": [["normal", "Clock, buses & sports"], ["music", "Music only"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
@@ -144,6 +153,7 @@ SETTINGS_FIELDS = [
      "options": [["all", "All teams"], ["favorite", "Favorite team only"], ["off", "Off"]]},
 ]
 DEFAULT_SETTINGS = {
+    "display_mode": "normal",
     "day_brightness": DAY_BRIGHTNESS,
     "night_brightness": NIGHT_BRIGHTNESS,
     "screen_off_enabled": SCREEN_OFF_START_HOUR != SCREEN_OFF_END_HOUR,
@@ -1033,6 +1043,11 @@ def clear_spotify_now_playing():
     spotify_artist_name = ""
 
 
+def spotify_active():
+    # Music mode always needs Spotify; otherwise it follows the album art switch
+    return settings["spotify_enabled"] or settings["display_mode"] == "music"
+
+
 def fetch_spotify_now_playing():
     global spotify_album_art
     global spotify_album_art_url
@@ -1043,7 +1058,7 @@ def fetch_spotify_now_playing():
     global spotify_track_name
     global spotify_artist_name
 
-    if not settings["spotify_enabled"]:
+    if not spotify_active():
         clear_spotify_now_playing()
         return
 
@@ -1384,13 +1399,43 @@ def draw_blinking_clock(canvas):
     return draw_clock_left(canvas, False)
 
 
+def to_display_text(text):
+    # The LED fonts are ASCII: turn "Beyoncé" into "Beyonce" and drop what can't be drawn
+    ascii_text = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    return " ".join(ascii_text.split())
+
+
+def draw_marquee(canvas, font, text, y, color, elapsed):
+    # Draw text in the left half; if it's too wide, hold, then scroll it in a loop.
+    # Anything past x=32 is covered by the album art drawn afterwards.
+    width = sum(font.CharacterWidth(ord(c)) for c in text)
+    if width <= 30:
+        graphics.DrawText(canvas, font, 1, y, color, text)
+        return
+    loop = width + MUSIC_SCROLL_GAP
+    period = MUSIC_SCROLL_PAUSE + loop / MUSIC_SCROLL_SPEED
+    shift = int(max(0.0, elapsed % period - MUSIC_SCROLL_PAUSE) * MUSIC_SCROLL_SPEED)
+    graphics.DrawText(canvas, font, 1 - shift, y, color, text)
+    graphics.DrawText(canvas, font, 1 - shift + loop, y, color, text)
+
+
+def draw_music_screen(canvas, art, elapsed):
+    # elapsed: seconds since this song started showing (restarts the scrolling for each song)
+    title_color = nfl_score_color if spotify_is_playing else nfl_loser_score_color
+    draw_marquee(canvas, nfl_score_font, to_display_text(spotify_track_name), 14, title_color, elapsed)
+    draw_marquee(canvas, nfl_status_font, to_display_text(spotify_artist_name), 26, nfl_status_color, elapsed)
+    draw_spotify_art(canvas, art)
+
+
 def draw_spotify_art(canvas, art):
     canvas.SetImage(art, 32, 0)
 
     # 1px progress bar along the bottom of the cover, estimated between polls
     if spotify_duration_ms <= 0:
         return
-    progress_ms = spotify_progress_ms + (time.monotonic() - spotify_progress_at) * 1000
+    progress_ms = spotify_progress_ms
+    if spotify_is_playing:
+        progress_ms += (time.monotonic() - spotify_progress_at) * 1000
     filled = int(32 * min(1.0, max(0.0, progress_ms / spotify_duration_ms)))
     for i in range(32):
         if i < filled:
@@ -1441,6 +1486,8 @@ td_alert = None
 td_alert_start = 0.0
 message_screen = None
 message_start = 0.0
+music_track = None
+music_start = 0.0
 next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
@@ -1451,8 +1498,10 @@ try:
     while True:
         art = spotify_album_art
         spotify_now = settings["spotify_enabled"] and spotify_is_playing and art is not None
+        music_mode = settings["display_mode"] == "music"
 
-        brightness = get_brightness(spotify_now)
+        # A song playing keeps the screen on overnight (dimmed), in either mode
+        brightness = get_brightness(spotify_now or (music_mode and spotify_is_playing and art is not None))
         if brightness == 0:
             offscreen_canvas.Clear()
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
@@ -1472,7 +1521,7 @@ try:
             cycle_start = 0.0  # force a fresh cycle below
 
         # Touchdowns interrupt the clock/bus screens right away (but wait for a running ticker)
-        if td_alert is None and nfl_td_alerts:
+        if td_alert is None and nfl_td_alerts and not music_mode:
             alert = next_td_alert()
             if alert is not None:
                 td_alert = build_td_alert(alert)
@@ -1503,6 +1552,21 @@ try:
             finish_message(message_screen["id"])
             message_screen = None
             cycle_start = 0.0  # force a fresh cycle below
+
+        # Music mode: song title and artist on the left, album art on the right. With nothing
+        # loaded in Spotify it falls through to the normal clock and bus screens.
+        if music_mode and art is not None:
+            track = (spotify_track_name, spotify_artist_name)
+            if track != music_track:
+                music_track = track
+                music_start = time.monotonic()
+            offscreen_canvas.brightness = brightness
+            offscreen_canvas.Clear()
+            draw_music_screen(offscreen_canvas, art, time.monotonic() - music_start)
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(NFL_TICKER_FRAME)
+            cycle_start = 0.0  # start a fresh cycle if music mode ends
+            continue
 
         cycle_seconds = bus_screen["cycle_seconds"] + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
         elapsed = time.monotonic() - cycle_start
