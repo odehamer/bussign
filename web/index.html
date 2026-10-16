@@ -151,6 +151,10 @@
     padding: 9px 10px; border-radius: 10px; border: 1px solid var(--panel-edge);
     background: #0f1115; color: var(--text); font: inherit; font-size: 15px; max-width: 60%;
   }
+  input.text-setting {
+    width: 55%; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--panel-edge);
+    background: #0f1115; color: var(--text); font: inherit; font-size: 15px;
+  }
   .switch { position: relative; width: 50px; height: 30px; flex: none; }
   .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; cursor: pointer; }
   .switch span {
@@ -199,7 +203,7 @@
         <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
           <label class="mode">
             <input type="radio" name="mode" value="normal">
-            <span><span class="mode-name">Normal</span><span class="mode-desc">Clock, weather &amp; bus times, with NFL scores on game days</span></span>
+            <span><span class="mode-name">Normal</span><span class="mode-desc">Clock, weather &amp; bus times</span></span>
           </label>
           <label class="mode">
             <input type="radio" name="mode" value="music">
@@ -470,8 +474,8 @@
       setSettingsStatus("Saved");
       updateDependentSettings();
     } catch (e) {
+      await loadSettings();  // put the controls back to what the sign actually has
       setSettingsStatus(e.message, true);
-      loadSettings();  // put the controls back to what the sign actually has
     }
   }
 
@@ -515,6 +519,16 @@
         shown.textContent = value + "%";
         input.addEventListener("input", () => { shown.textContent = input.value + "%"; });
         input.addEventListener("change", () => saveSetting(field.key, Number(input.value)));
+      } else if (field.type === "text") {
+        row.innerHTML = `<div class="setting-row"><label for="${id}"></label>
+          <input type="text" class="text-setting" id="${id}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>`;
+        const input = row.querySelector("input");
+        input.value = value;
+        input.maxLength = field.max_length || 40;
+        input.placeholder = field.placeholder || "";
+        // Saves when you finish editing (tap away or press return)
+        input.addEventListener("change", () => saveSetting(field.key, input.value.trim()));
+        input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
       } else if (field.type === "toggle") {
         row.innerHTML = `<div class="setting-row"><label for="${id}"></label>
           <span class="switch"><input type="checkbox" role="switch" id="${id}"><span></span></span></div>`;

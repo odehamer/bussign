@@ -75,20 +75,15 @@ BUS_STALE_SECONDS = 120
 RAIN_LOOKAHEAD_HOURS = 6
 RAIN_CHANCE_THRESHOLD = 0.5  # forecast probability of precipitation (0-1)
 
-# NFL scores ticker: scrolls across the whole screen, only on days with games, showing that day's
-# games that have started or finished. Repeats every NFL_TICKER_LIVE_INTERVAL seconds while any
-# game is in progress, otherwise every NFL_TICKER_INTERVAL seconds.
+# NFL scores (sports mode only). Today's games are watched for touchdowns; the sports ticker
+# scrolls through the whole week's games.
 NFL_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-NFL_TICKER_LIVE_INTERVAL = 60
-NFL_TICKER_INTERVAL = 300
-NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
 NFL_TICKER_SPEED = 40        # pixels per second
-NFL_TICKER_PAUSE = 1.0       # seconds to hold on each game once it's centered
-NFL_SINGLE_GAME_PAUSE = 10.0 # hold this long when the ticker only has one game (e.g. Thursday night)
 # Sports mode: loops through all of this week's games (finished, live and upcoming)
 SPORTS_GAME_SECONDS = 4.0    # hold on each game (the favorite team's game holds 1.5x as long)
 SPORTS_CHECK_SECONDS = 15    # how often the week's scores are checked for being out of date
-# Sleeper fantasy matchups, shown after the NFL games in sports mode
+# Sleeper fantasy matchups, shown after the NFL games in sports mode. The username is a setting
+# on the control page; this is the default.
 SLEEPER_USERNAME = "odehamer"
 SLEEPER_API = "https://api.sleeper.app/v1/"
 FANTASY_SECONDS = 5.0           # hold on each matchup in the sports ticker
@@ -108,7 +103,6 @@ TD_TRY_WAIT_SECONDS = 120    # wait up to this long for the extra point / two-po
 # Favorite team (ESPN abbreviation): its game leads the ticker, holds longer and is underlined,
 # and its touchdowns get a longer alert with a flashing border
 FAVORITE_TEAM = "ATL"
-NFL_FAVORITE_PAUSE = 2.0         # seconds to hold on the favorite team's game in the ticker
 FAVORITE_TD_FLASH_SECONDS = 4.0  # "TOUCHDOWN" flash length for the favorite team
 TD_ALERTS_FAVORITE_ONLY = False  # True = only alert for the favorite team's touchdowns
 
@@ -157,8 +151,9 @@ SETTINGS_FIELDS = [
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
     {"key": "screen_off_start", "section": "Screen", "label": "Screen off at", "type": "hour"},
     {"key": "screen_off_end", "section": "Screen", "label": "Screen back on at", "type": "hour"},
-    {"key": "nfl_ticker_enabled", "section": "Football", "label": "NFL scores ticker on game days", "type": "toggle"},
     {"key": "fantasy_enabled", "section": "Football", "label": "Fantasy matchups in sports mode", "type": "toggle"},
+    {"key": "sleeper_username", "section": "Football", "label": "Sleeper username", "type": "text",
+     "max_length": 40, "placeholder": "Sleeper username"},
     {"key": "favorite_team", "section": "Football", "label": "Favorite team", "type": "choice",
      "options": [["", "None"]] + [list(team) for team in NFL_TEAMS]},
     {"key": "touchdown_alerts", "section": "Football", "label": "Touchdown alerts (sports mode)", "type": "choice",
@@ -171,13 +166,13 @@ DEFAULT_SETTINGS = {
     "screen_off_enabled": SCREEN_OFF_START_HOUR != SCREEN_OFF_END_HOUR,
     "screen_off_start": SCREEN_OFF_START_HOUR,
     "screen_off_end": SCREEN_OFF_END_HOUR,
-    "nfl_ticker_enabled": True,
     "fantasy_enabled": True,
+    "sleeper_username": SLEEPER_USERNAME,
     "favorite_team": FAVORITE_TEAM,
     "touchdown_alerts": "favorite" if TD_ALERTS_FAVORITE_ONLY else "all",
 }
 settings_lock = threading.Lock()
-RETIRED_SETTINGS = {"spotify_enabled"}  # older settings.json files may still have these; skipped quietly
+RETIRED_SETTINGS = {"spotify_enabled", "nfl_ticker_enabled"}  # older settings.json files may still have these; skipped quietly
 
 
 def validate_setting(key, value):
@@ -196,6 +191,10 @@ def validate_setting(key, value):
     elif kind == "choice":
         if value not in [option[0] for option in field["options"]]:
             return f"{field['label']} isn't one of the choices"
+    elif kind == "text":
+        # Sleeper usernames are letters, numbers and _ . - only
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,%d}" % field["max_length"], value):
+            return f"{field['label']} can only use letters, numbers, _ . and -"
     return None
 
 
@@ -244,7 +243,9 @@ def update_settings(changes):
             print(f"Couldn't save settings (still applied until restart): {e}")
         settings = new_settings
     print("Settings changed: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
-    if "display_mode" in changes or "fantasy_enabled" in changes:
+    if "sleeper_username" in changes:
+        reset_fantasy()
+    if "display_mode" in changes or "fantasy_enabled" in changes or "sleeper_username" in changes:
         nfl_week_wakeup.set()
     return dict(new_settings), None
 
@@ -277,14 +278,13 @@ last_bus_update = None  # time.monotonic() of the last successful bus fetch
 rain_expected = False
 nfl_games = []  # live/finished games, see parse_nfl_games
 nfl_has_live = False
-nfl_games_day = ""  # YYYYMMDD that nfl_games belong to
 nfl_next_kickoff = None  # UTC datetime of today's next game that hasn't started
 nfl_last_summary = ""  # last logged NFL status, so unchanged refreshes stay quiet
 nfl_week_games = []  # this week's games for sports mode, including ones that haven't started
 nfl_week_has_live = False
 nfl_week_fetched_at = float("-inf")
 nfl_week_summary = ""
-fantasy_matchups = []  # this week's Sleeper matchups for SLEEPER_USERNAME, see get_fantasy_matchups
+fantasy_matchups = []  # this week's Sleeper matchups for the sleeper_username setting
 fantasy_fetched_at = float("-inf")
 fantasy_summary = ""
 fantasy_user_id = None
@@ -744,7 +744,6 @@ def load_missing_nfl_logos(games):
 def get_nfl_scores():
     global nfl_games
     global nfl_has_live
-    global nfl_games_day
     global nfl_next_kickoff
     global nfl_last_summary
     try:
@@ -763,7 +762,6 @@ def get_nfl_scores():
         load_missing_nfl_logos(games)
         check_for_touchdowns(games)
         nfl_games = games
-        nfl_games_day = day
         nfl_has_live = any(g["state"] == "in" for g in games)
         nfl_next_kickoff = min(kickoffs) if kickoffs else None
         log_ok("NFL scores")
@@ -861,11 +859,24 @@ def load_missing_fantasy_pictures(matchups):
                 log_error("Fantasy picture", e)
 
 
+def reset_fantasy():
+    # Forget the old user's leagues and matchups so a new username loads from scratch
+    global fantasy_matchups, fantasy_fetched_at, fantasy_user_id
+    fantasy_matchups = []
+    fantasy_fetched_at = float("-inf")
+    fantasy_user_id = None
+    fantasy_leagues.update(fetched_at=float("-inf"), season=None, leagues=[])
+
+
 def get_fantasy_matchups():
     global fantasy_matchups, fantasy_fetched_at, fantasy_summary, fantasy_user_id
+    username = settings["sleeper_username"]
     try:
         if fantasy_user_id is None:
-            fantasy_user_id = sleeper_get(f"user/{SLEEPER_USERNAME}")["user_id"]
+            user = sleeper_get(f"user/{username}")
+            if not user:
+                raise ValueError(f"no Sleeper user named {username!r}")
+            fantasy_user_id = user["user_id"]
         state = sleeper_get("state/nfl")
         season, week = state.get("season"), state.get("display_week") or state.get("week")
         if (fantasy_leagues["season"] != season
@@ -883,7 +894,7 @@ def get_fantasy_matchups():
                              and t.get("roster_id") != me.get("roster_id")), None)
             matchups.append({
                 "league": league["name"],
-                "my_name": league["names"].get(me.get("roster_id"), SLEEPER_USERNAME),
+                "my_name": league["names"].get(me.get("roster_id"), username),
                 "my_points": float(me.get("points") or 0),
                 "opponent_name": league["names"].get(opponent.get("roster_id"), "?") if opponent else "BYE",
                 "opponent_points": float(opponent.get("points") or 0) if opponent else None,
@@ -891,10 +902,12 @@ def get_fantasy_matchups():
                 "opponent_picture": league["pictures"].get(opponent.get("roster_id"), "") if opponent else "",
             })
         load_missing_fantasy_pictures(matchups)
+        if username != settings["sleeper_username"]:
+            return  # the username changed while loading; the next refresh loads the new one
         fantasy_matchups = matchups
         fantasy_fetched_at = time.monotonic()
         log_ok("Fantasy")
-        summary = f"Fantasy week {week}: {len(matchups)} matchups for {SLEEPER_USERNAME}"
+        summary = f"Fantasy week {week}: {len(matchups)} matchups for {username}"
         if summary != fantasy_summary:
             print(summary)
             fantasy_summary = summary
@@ -928,13 +941,6 @@ def get_nfl_poll_seconds():
     return NFL_POLL_SECONDS
 
 
-def get_todays_nfl_games():
-    # Ignore scores left over from a previous day until the next refresh replaces them
-    if nfl_games_day != datetime.now().strftime("%Y%m%d"):
-        return []
-    return nfl_games
-
-
 def schedule_nfl_update():
     get_nfl_scores()
     timer = threading.Timer(get_nfl_poll_seconds(), schedule_nfl_update)
@@ -948,14 +954,7 @@ NFL_LOGO_TOP = 10
 NFL_SCORE_BASELINE = 23
 
 
-def get_nfl_game_pause(game, game_count):
-    # Seconds to hold on a game once it's centered in the ticker
-    if game_count == 1:
-        return NFL_SINGLE_GAME_PAUSE
-    return NFL_FAVORITE_PAUSE if is_favorite(game) else NFL_TICKER_PAUSE
-
-
-def build_nfl_ticker(games, hold_seconds=None, matchups=()):
+def build_nfl_ticker(games, hold_seconds, matchups=()):
     # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
     segments = []
     x = 0
@@ -1023,10 +1022,7 @@ def build_nfl_ticker(games, hold_seconds=None, matchups=()):
             segments.append({"x": game_start, "width": x - game_start, "kind": "underline",
                              "color": favorite["color"]})
         # Scroll distance at which this game sits centered on screen, and how long to hold there
-        if hold_seconds is None:
-            hold = get_nfl_game_pause(game, len(games))
-        else:
-            hold = hold_seconds * (1.5 if is_favorite(game) else 1)
+        hold = hold_seconds * (1.5 if is_favorite(game) else 1)
         stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2, hold))
     if matchups:
         # Fantasy matchups: league name on top, each team's picture with its score underneath
@@ -1057,7 +1053,7 @@ def build_nfl_ticker(games, hold_seconds=None, matchups=()):
                                  "color": nfl_score_color if leading else nfl_loser_score_color})
             x = card_start + 2 * column
             stops.append((options.cols + card_start - (options.cols - 2 * column) // 2,
-                          hold_seconds or FANTASY_SECONDS))
+                          FANTASY_SECONDS))
     # When each stop is reached, so a long league name starts scrolling once its card is centered
     arrivals, elapsed, scrolled = [], 0.0, 0
     for stop, hold in stops:
@@ -1790,18 +1786,16 @@ try:
 except Exception as e:
     # The sign keeps working without the control page
     log_error("Control page", e)
-nfl_ticker = None
-nfl_ticker_start = 0.0
 td_alert = None
 td_alert_start = 0.0
 message_screen = None
 message_start = 0.0
 music_track = None
 sports_ticker = None
+sports_ticker_user = None
 sports_start = 0.0
 sports_last_frame = 0.0
 music_start = 0.0
-next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
 has_buses = bool(arrival_times)
@@ -1819,19 +1813,7 @@ try:
             time.sleep(1)
             continue
 
-        if nfl_ticker is not None:
-            # NFL ticker takes over the whole screen until it has scrolled past
-            offscreen_canvas.brightness = brightness
-            offscreen_canvas.Clear()
-            if draw_nfl_ticker(offscreen_canvas, nfl_ticker, time.monotonic() - nfl_ticker_start):
-                offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
-                time.sleep(NFL_TICKER_FRAME)
-                continue
-            nfl_ticker = None
-            next_nfl_ticker_at = time.monotonic() + (NFL_TICKER_LIVE_INTERVAL if nfl_has_live else NFL_TICKER_INTERVAL)
-            cycle_start = 0.0  # force a fresh cycle below
-
-        # Touchdowns interrupt the clock/bus screens right away (but wait for a running ticker)
+        # Touchdowns (sports mode) interrupt right away
         if td_alert is None and nfl_td_alerts and settings["display_mode"] == "sports":
             alert = next_td_alert()
             if alert is not None:
@@ -1871,6 +1853,8 @@ try:
         matchups = fantasy_matchups if settings["fantasy_enabled"] else []
         if settings["display_mode"] == "sports" and (week_games or matchups):
             now = time.monotonic()
+            if sports_ticker_user != settings["sleeper_username"]:
+                sports_ticker, sports_ticker_user = None, settings["sleeper_username"]
             if sports_ticker is None:
                 sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS, matchups=matchups)
                 sports_start = now
@@ -1909,13 +1893,6 @@ try:
             bus_screen = get_bus_screen()
             has_buses = bool(arrival_times)
             elapsed = 0
-
-            # Run the NFL ticker between cycles so it never cuts off the bus screens
-            games = get_todays_nfl_games()
-            if settings["nfl_ticker_enabled"] and games and time.monotonic() >= next_nfl_ticker_at:
-                nfl_ticker = build_nfl_ticker(games)
-                nfl_ticker_start = time.monotonic()
-                continue
 
         stale = bus_data_is_stale()
         offscreen_canvas.brightness = brightness
