@@ -807,15 +807,15 @@ def sleeper_get(path):
 
 
 def load_fantasy_leagues(season):
-    # League names, which roster is ours (owner or co-owner) and every team's name. Cached because
+    # League names, which roster is ours and every team's name and picture. Cached because
     # these barely change during a week.
     leagues = []
     for league in sleeper_get(f"user/{fantasy_user_id}/leagues/nfl/{season}") or []:
         league_id = league.get("league_id")
         rosters = sleeper_get(f"league/{league_id}/rosters") or []
         users = {u.get("user_id"): u for u in sleeper_get(f"league/{league_id}/users") or []}
-        mine = next((r for r in rosters if r.get("owner_id") == fantasy_user_id
-                     or fantasy_user_id in (r.get("co_owners") or [])), None)
+        # Only teams we own; leagues where we're just a co-manager are skipped
+        mine = next((r for r in rosters if r.get("owner_id") == fantasy_user_id), None)
         if mine is None:
             continue
         names, pictures = {}, {}
