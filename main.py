@@ -73,6 +73,7 @@ NFL_TICKER_INTERVAL = 300
 NFL_TICKER_FIRST_DELAY = 30  # seconds after startup before the first ticker
 NFL_TICKER_SPEED = 40        # pixels per second
 NFL_TICKER_PAUSE = 1.0       # seconds to hold on each game once it's centered
+NFL_SINGLE_GAME_PAUSE = 10.0 # hold this long when the ticker only has one game (e.g. Thursday night)
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
 NFL_POLL_SECONDS = 600       # how often to refresh scores when nothing is happening
 NFL_LIVE_POLL_SECONDS = 60   # refresh rate while a game is in progress or about to kick off
@@ -594,6 +595,13 @@ NFL_LOGO_TOP = 10
 NFL_SCORE_BASELINE = 23
 
 
+def get_nfl_game_pause(game, game_count):
+    # Seconds to hold on a game once it's centered in the ticker
+    if game_count == 1:
+        return NFL_SINGLE_GAME_PAUSE
+    return NFL_FAVORITE_PAUSE if game["favorite"] else NFL_TICKER_PAUSE
+
+
 def build_nfl_ticker(games):
     # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
     segments = []
@@ -652,7 +660,7 @@ def build_nfl_ticker(games):
                              "color": favorite["color"]})
         # Scroll distance at which this game sits centered on screen, and how long to hold there
         stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2,
-                      NFL_FAVORITE_PAUSE if game["favorite"] else NFL_TICKER_PAUSE))
+                      get_nfl_game_pause(game, len(games))))
     return {"segments": segments, "width": x, "stops": stops}
 
 
