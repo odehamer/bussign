@@ -92,6 +92,7 @@ NFL_LOGO_SIZE = 16           # team logos are scaled to this many pixels square
 NFL_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary"
 TD_FLASH_SECONDS = 2.4       # "TOUCHDOWN" flashes this long before the play details scroll
 TD_ALERT_MAX_AGE = 600       # drop touchdown alerts that couldn't be shown within this many seconds
+TD_TRY_WAIT_SECONDS = 120    # wait up to this long for the extra point / two-point try before alerting
 
 # Favorite team (ESPN abbreviation): its game leads the ticker, holds longer and is underlined,
 # and its touchdowns get a longer alert with a flashing border
@@ -602,17 +603,46 @@ def clean_play_text(text):
     return scorer.upper(), description.upper()
 
 
+def touchdown_try_done(play, points_added):
+    # ESPN adds the try result in parentheses once it's played, e.g. "(Wil Lutz Kick)" or
+    # "(Two-Point Conversion Failed)"; a 7 or 8 point jump also means the try is already counted
+    return "(" in (play.get("text") or "") or points_added >= 7
+
+
+def queue_touchdown_alert(game, play):
+    abbr = (play.get("team") or {}).get("abbreviation", "")
+    teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
+    team = teams.get(abbr)
+    opponent = next((t for a, t in teams.items() if a != abbr), None)
+    away_score, home_score = to_int(play.get("awayScore")), to_int(play.get("homeScore"))
+    team_score, opponent_score = (away_score, home_score) if team is game["away"] else (home_score, away_score)
+    scorer, description = clean_play_text(play.get("text"))
+    nfl_td_alerts.append({
+        "abbr": abbr,
+        "color": team["color"] if team else (255, 255, 255),
+        "opponent": opponent["abbr"] if opponent else "",
+        "score": f"{team_score}-{opponent_score}",
+        "scorer": scorer,
+        "description": description,
+        "queued_at": time.monotonic(),
+        "favorite": bool(abbr) and abbr == settings["favorite_team"],
+    })
+    print(f"Touchdown {abbr}: {description} ({team_score}-{opponent_score})")
+
+
 def check_for_touchdowns(games):
-    # The scoreboard only has totals; when a game's total goes up, fetch that game's scoring plays
+    # The scoreboard only has totals; when a game's total goes up (or a touchdown is waiting on its
+    # extra point), fetch that game's scoring plays
     for game in games:
         if not game["id"]:
             continue
         total = to_int(game["away"]["score"]) + to_int(game["home"]["score"])
         track = nfl_score_tracking.get(game["id"])
         if track is None:
-            nfl_score_tracking[game["id"]] = {"baseline": total, "checked_total": total, "seen": set()}
+            nfl_score_tracking[game["id"]] = {"baseline": total, "checked_total": total, "seen": set(),
+                                              "pending": {}}
             continue
-        if total <= track["checked_total"]:
+        if total <= track["checked_total"] and not track["pending"]:
             continue
         try:
             response = requests.get(NFL_SUMMARY_URL, params={"event": game["id"]}, timeout=10)
@@ -623,15 +653,28 @@ def check_for_touchdowns(games):
             continue  # try again on the next refresh
         log_ok("NFL scoring plays")
 
-        teams = {game[side]["abbr"]: game[side] for side in ("away", "home")}
+        now = time.monotonic()
         latest_total = track["checked_total"]
+        previous = {"away": 0, "home": 0}
         for play in plays:
-            play_total = to_int(play.get("awayScore")) + to_int(play.get("homeScore"))
+            scores = {"away": to_int(play.get("awayScore")), "home": to_int(play.get("homeScore"))}
+            play_total = scores["away"] + scores["home"]
+            points_added = max(scores["away"] - previous["away"], scores["home"] - previous["home"])
+            previous = scores
             # The summary can lag the scoreboard; only count what it actually includes
             latest_total = max(latest_total, play_total)
-            if play.get("id") in track["seen"]:
+            play_id = play.get("id")
+
+            if play_id in track["pending"]:
+                # Waiting on the try: alert once it's played, the game is over, or we've waited long enough
+                if (touchdown_try_done(play, points_added) or game["state"] == "post"
+                        or now - track["pending"][play_id] >= TD_TRY_WAIT_SECONDS):
+                    del track["pending"][play_id]
+                    queue_touchdown_alert(game, play)
                 continue
-            track["seen"].add(play.get("id"))
+            if play_id in track["seen"]:
+                continue
+            track["seen"].add(play_id)
             if play_total <= track["baseline"]:
                 continue  # scored before we started watching this game
             if (play.get("scoringType") or {}).get("name") != "touchdown":
@@ -640,22 +683,10 @@ def check_for_touchdowns(games):
             alerts = settings["touchdown_alerts"]
             if alerts == "off" or (alerts == "favorite" and abbr != settings["favorite_team"]):
                 continue
-            team = teams.get(abbr)
-            opponent = next((t for a, t in teams.items() if a != abbr), None)
-            away_score, home_score = to_int(play.get("awayScore")), to_int(play.get("homeScore"))
-            team_score, opponent_score = (away_score, home_score) if team is game["away"] else (home_score, away_score)
-            scorer, description = clean_play_text(play.get("text"))
-            nfl_td_alerts.append({
-                "abbr": abbr,
-                "color": team["color"] if team else (255, 255, 255),
-                "opponent": opponent["abbr"] if opponent else "",
-                "score": f"{team_score}-{opponent_score}",
-                "scorer": scorer,
-                "description": description,
-                "queued_at": time.monotonic(),
-                "favorite": bool(abbr) and abbr == settings["favorite_team"],
-            })
-            print(f"Touchdown {abbr}: {description} ({team_score}-{opponent_score})")
+            if touchdown_try_done(play, points_added) or game["state"] == "post":
+                queue_touchdown_alert(game, play)
+            else:
+                track["pending"][play_id] = now
         track["checked_total"] = latest_total
 
 
