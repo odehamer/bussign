@@ -34,62 +34,17 @@
     padding: 16px; margin-bottom: 16px;
   }
 
-  /* Sign preview: 64x32 panel proportions with a dotted LED look */
-  .sign {
-    position: relative; aspect-ratio: 2 / 1; border-radius: 10px; overflow: hidden; margin-bottom: 14px;
-    background-color: #000;
-    background-image: radial-gradient(circle, #1a1d22 0.9px, transparent 1.1px);
-    background-size: calc(100% / 64) calc(100% / 32);
-    display: flex; align-items: center;
-  }
-  .sign-text {
-    white-space: nowrap; font: 700 clamp(22px, 9vw, 40px)/1 "Courier New", ui-monospace, monospace;
-    letter-spacing: 0.04em; padding-left: 100%;
-    text-shadow: 0 0 8px currentColor;
-  }
-  .sign-text.fits { padding-left: 0; width: 100%; text-align: center; }
-  .sign-text.scrolling { animation: scroll var(--duration, 6s) linear infinite; }
-  @keyframes scroll { to { transform: translateX(-100%); } }
-  @media (prefers-reduced-motion: reduce) { .sign-text.scrolling { animation: none; padding-left: 8px; } }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  textarea {
-    width: 100%; min-height: 76px; resize: vertical; padding: 12px; border-radius: 10px;
-    border: 1px solid var(--panel-edge); background: #0f1115; color: var(--text); font: inherit;
-  }
-  textarea:focus, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .counter { text-align: right; font-size: 13px; color: var(--muted); margin: 4px 2px 12px; }
-
-  .colors { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
-  .swatch {
-    width: 40px; height: 40px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
-    box-shadow: inset 0 0 0 2px rgba(0,0,0,0.35);
-  }
-  .swatch[aria-pressed="true"] { border-color: var(--text); transform: scale(1.08); }
-
-  .toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; color: var(--muted); }
-  .toggle input { width: 22px; height: 22px; accent-color: var(--accent); }
-
-  button.primary, button.secondary {
+  button.primary {
     width: 100%; padding: 14px; border-radius: 12px; border: 0; cursor: pointer;
     font-family: inherit; font-size: 17px; font-weight: 600; line-height: 1;
   }
   button.primary { background: var(--accent); color: #041314; }
   button.primary:disabled { opacity: 0.5; cursor: default; }
-  button.secondary { background: transparent; color: var(--danger); border: 1px solid #3a2328; margin-top: 4px; }
 
   .status { min-height: 20px; margin-top: 10px; font-size: 14px; color: var(--muted); text-align: center; }
   .status.error { color: var(--danger); }
-
-  ul { list-style: none; margin: 0 0 12px; padding: 0; }
-  li {
-    display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--panel-edge);
-  }
-  li:first-child { border-top: 0; }
-  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
-  .msg { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-  .meta { display: block; font-size: 12px; color: var(--muted); }
-  .remove { background: none; border: 0; color: var(--muted); font-size: 22px; padding: 4px 8px; cursor: pointer; }
-  .empty { color: var(--muted); font-size: 14px; margin: 0; }
 
   .pin-row { display: flex; gap: 8px; }
   .pin-row input {
@@ -131,7 +86,7 @@
   .mode-desc { display: block; font-size: 13px; color: var(--muted); }
 
   .tabs {
-    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
   }
   .tabs button {
@@ -185,7 +140,6 @@
   <div id="app">
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tab-btn-sign" aria-selected="true" aria-controls="tab-sign">Sign</button>
-      <button type="button" role="tab" id="tab-btn-messages" aria-selected="false" aria-controls="tab-messages">Message</button>
       <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
     </div>
 
@@ -218,28 +172,6 @@
       </section>
     </div>
 
-    <div id="tab-messages" role="tabpanel" aria-labelledby="tab-btn-messages" hidden>
-    <section>
-      <h2>Send a message</h2>
-      <div class="sign" aria-hidden="true"><div class="sign-text fits" id="preview">HELLO</div></div>
-      <form id="message-form">
-        <textarea id="text" maxlength="100" placeholder="Dinner's ready!" aria-label="Message"></textarea>
-        <div class="counter"><span id="count">0</span>/<span id="max">100</span></div>
-        <div class="colors" id="colors" role="group" aria-label="Color"></div>
-        <label class="toggle"><input type="checkbox" id="repeat"> Repeat every 5 minutes for an hour</label>
-        <button class="primary" type="submit" id="send">Send to sign</button>
-        <div class="status" id="status" role="status" aria-live="polite"></div>
-      </form>
-    </section>
-
-    <section>
-      <h2>Queued</h2>
-      <ul id="queue"></ul>
-      <p class="empty" id="empty">Nothing queued.</p>
-      <button class="secondary" type="button" id="clear" hidden>Clear all</button>
-    </section>
-    </div>
-
     <div id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings" hidden>
       <div id="settings"></div>
       <div class="status" id="settings-status" role="status" aria-live="polite"></div>
@@ -247,11 +179,7 @@
   </div>
 
 <script>
-  const COLOR_VALUES = {
-    white: "#ffffff", red: "#dc1e32", gold: "#ffbe00", green: "#00dc5a", cyan: "#2be0e3", pink: "#d60bb4",
-  };
   const $ = (id) => document.getElementById(id);
-  let color = "white";
   let pin = "";
   try { pin = localStorage.getItem("signPin") || ""; } catch (e) {}
 
@@ -283,124 +211,15 @@
     $("pin").focus();
   }
 
-  function setStatus(text, isError) {
-    $("status").textContent = text;
-    $("status").classList.toggle("error", !!isError);
-  }
-
-  function updatePreview() {
-    const text = $("text").value.trim() || "HELLO";
-    const preview = $("preview");
-    preview.textContent = text;
-    preview.style.color = COLOR_VALUES[color];
-    // Roughly 9 characters fit on the 64px sign before it has to scroll
-    const fits = text.length <= 9;
-    preview.classList.toggle("fits", fits);
-    preview.classList.toggle("scrolling", !fits);
-    preview.style.setProperty("--duration", Math.max(4, text.length * 0.25) + "s");
-    $("count").textContent = $("text").value.length;
-  }
-
-  function renderColors(names) {
-    const group = $("colors");
-    group.innerHTML = "";
-    names.forEach((name) => {
-      const swatch = document.createElement("button");
-      swatch.type = "button";
-      swatch.className = "swatch";
-      swatch.style.background = COLOR_VALUES[name] || name;
-      swatch.setAttribute("aria-label", name);
-      swatch.setAttribute("aria-pressed", String(name === color));
-      swatch.addEventListener("click", () => {
-        color = name;
-        group.querySelectorAll(".swatch").forEach((s) => s.setAttribute("aria-pressed", String(s === swatch)));
-        updatePreview();
-      });
-      group.appendChild(swatch);
-    });
-  }
-
-  function renderQueue(messages) {
-    const list = $("queue");
-    list.innerHTML = "";
-    messages.forEach((m) => {
-      const item = document.createElement("li");
-      const dot = document.createElement("span");
-      dot.className = "dot";
-      dot.style.background = COLOR_VALUES[m.color] || "#fff";
-      const text = document.createElement("span");
-      text.className = "msg";
-      text.textContent = m.text;
-      const meta = document.createElement("span");
-      meta.className = "meta";
-      meta.textContent = m.repeat ? `Repeating · ${m.minutes_left} min left` : "Waiting to show";
-      text.appendChild(meta);
-      const remove = document.createElement("button");
-      remove.className = "remove";
-      remove.type = "button";
-      remove.textContent = "×";
-      remove.setAttribute("aria-label", `Remove "${m.text}"`);
-      remove.addEventListener("click", async () => {
-        try { await api("DELETE", `/api/messages/${m.id}`); refresh(); } catch (e) { setStatus(e.message, true); }
-      });
-      item.append(dot, text, remove);
-      list.appendChild(item);
-    });
-    $("empty").hidden = messages.length > 0;
-    $("clear").hidden = messages.length === 0;
-  }
-
-  let colorsRendered = false;
-  async function refresh() {
-    try {
-      const data = await api("GET", "/api/messages");
-      $("pin-section").hidden = true;
-      $("app").hidden = false;
-      if (!colorsRendered) {
-        renderColors(data.colors);
-        $("max").textContent = data.max_length;
-        $("text").maxLength = data.max_length;
-        colorsRendered = true;
-      }
-      renderQueue(data.messages);
-    } catch (e) {
-      if (e.message !== "PIN required") setStatus("Can't reach the sign", true);
-    }
-  }
-
-  $("text").addEventListener("input", updatePreview);
-
-  $("message-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const text = $("text").value.trim();
-    if (!text) { setStatus("Type a message first", true); return; }
-    $("send").disabled = true;
-    try {
-      await api("POST", "/api/messages", { text, color, repeat: $("repeat").checked });
-      $("text").value = "";
-      updatePreview();
-      setStatus("Sent! It'll show on the sign in a moment.");
-      refresh();
-    } catch (e) {
-      setStatus(e.message, true);
-    } finally {
-      $("send").disabled = false;
-    }
-  });
-
-  $("clear").addEventListener("click", async () => {
-    try { await api("DELETE", "/api/messages"); setStatus("Cleared."); refresh(); } catch (e) { setStatus(e.message, true); }
-  });
-
   $("pin-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     savePin($("pin").value);
-    try { await api("GET", "/api/messages"); refresh(); } catch (e) { showPin("That PIN didn't work"); }
+    try { await api("GET", "/api/settings"); loadMode(); } catch (e) { showPin("That PIN didn't work"); }
   });
 
   // ---- Tabs ----
   function showTab(name) {
-    ["sign", "messages", "settings"].forEach((tab) => {
+    ["sign", "settings"].forEach((tab) => {
       $("tab-" + tab).hidden = tab !== name;
       $("tab-btn-" + tab).setAttribute("aria-selected", String(tab === name));
     });
@@ -408,7 +227,6 @@
     if (name === "sign") { loadMode(); updateLive(); }
   }
   $("tab-btn-sign").addEventListener("click", () => showTab("sign"));
-  $("tab-btn-messages").addEventListener("click", () => showTab("messages"));
   $("tab-btn-settings").addEventListener("click", () => showTab("settings"));
 
   // ---- Mode (radio cards on the Sign tab) ----
@@ -423,6 +241,8 @@
     if (modeSaving) return;  // don't overwrite a switch that's still being saved
     try {
       const data = await api("GET", "/api/settings");
+      $("pin-section").hidden = true;
+      $("app").hidden = false;
       settingValues = data.values;
       showMode(data.values.display_mode);
     } catch (e) {
@@ -627,13 +447,10 @@
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) updateLive(); });
 
-  updatePreview();
-  refresh();
   loadMode();
   startLive();
-  setInterval(() => { if (!document.hidden) refresh(); }, 10000);
   // Keep the mode in sync if it's changed from another phone
-  setInterval(() => { if (!document.hidden && !$("tab-sign").hidden) loadMode(); }, 5000);
+  setInterval(() => { if (!document.hidden && !$("app").hidden && !$("tab-sign").hidden) loadMode(); }, 5000);
 </script>
 </body>
 </html>

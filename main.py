@@ -109,19 +109,6 @@ TD_ALERTS_FAVORITE_ONLY = False  # True = only alert for the favorite team's tou
 # Phone control page: http://<pi>.local:WEB_PORT on the home network. Set WEB_PIN in .env to require a PIN.
 WEB_PORT = 8080
 WEB_PIN = os.getenv("WEB_PIN", "")
-MESSAGE_LIFETIME = 3600       # messages expire this many seconds after they're sent
-MESSAGE_REPEAT_SECONDS = 300  # repeating messages come back this often until they expire
-MESSAGE_HOLD_SECONDS = 5      # short messages that fit on screen stay up this long
-MESSAGE_SCROLL_SPEED = 40     # pixels per second for messages too long to fit
-MAX_MESSAGES = 10
-MESSAGE_COLORS = {
-    "white": (255, 255, 255),
-    "red": (220, 30, 50),
-    "gold": (255, 190, 0),
-    "green": (0, 220, 90),
-    "cyan": (43, 224, 227),
-    "pink": (214, 11, 180),
-}
 NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
 NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
@@ -298,9 +285,6 @@ nfl_week_wakeup = threading.Event()  # set when the display mode changes, so spo
 # last summary fetch, and scoring play ids already handled
 nfl_score_tracking = {}
 nfl_td_alerts = deque()  # touchdowns waiting to be shown
-web_messages = []  # messages sent from the phone page, see add_message
-web_messages_lock = threading.Lock()
-web_message_ids = iter(range(1, 10 ** 9))
 nfl_logos = {}  # team abbreviation -> logo image (RGB, NFL_LOGO_SIZE square)
 current_temperature = 0
 weather_code = 0
@@ -1195,90 +1179,6 @@ def draw_td_alert(canvas, alert, elapsed):
     return True
 
 
-def add_message(text, color, repeat):
-    # Called from the web server thread; returns the new message id, or None if the queue is full
-    now = time.monotonic()
-    with web_messages_lock:
-        if len(web_messages) >= MAX_MESSAGES:
-            return None
-        message = {
-            "id": next(web_message_ids),
-            "text": text,
-            "color": color,
-            "repeat": repeat,
-            "next_show_at": now,
-            "expires_at": now + MESSAGE_LIFETIME,
-        }
-        web_messages.append(message)
-    print(f"Message queued: {text!r} ({color}{', repeating' if repeat else ''})")
-    return message["id"]
-
-
-def list_messages():
-    now = time.monotonic()
-    with web_messages_lock:
-        return [{
-            "id": m["id"],
-            "text": m["text"],
-            "color": m["color"],
-            "repeat": m["repeat"],
-            "minutes_left": max(0, round((m["expires_at"] - now) / 60)),
-        } for m in web_messages]
-
-
-def delete_message(message_id=None):
-    # Delete one message, or all of them when message_id is None; returns how many were removed
-    with web_messages_lock:
-        before = len(web_messages)
-        web_messages[:] = [m for m in web_messages if message_id is not None and m["id"] != message_id]
-        return before - len(web_messages)
-
-
-def next_message_due():
-    now = time.monotonic()
-    with web_messages_lock:
-        # Messages that never got shown in time (e.g. sent during screen-off hours) just expire
-        web_messages[:] = [m for m in web_messages if m["expires_at"] > now]
-        for message in web_messages:
-            if message["next_show_at"] <= now:
-                return dict(message)
-    return None
-
-
-def finish_message(message_id):
-    # After a message has been shown: schedule the next showing, or remove it
-    now = time.monotonic()
-    with web_messages_lock:
-        for message in web_messages:
-            if message["id"] != message_id:
-                continue
-            next_show_at = now + MESSAGE_REPEAT_SECONDS
-            if message["repeat"] and next_show_at < message["expires_at"]:
-                message["next_show_at"] = next_show_at
-            else:
-                web_messages.remove(message)
-            return
-
-
-def build_message_screen(message):
-    width = sum(wait_time_font.CharacterWidth(ord(c)) for c in message["text"])
-    return {**message, "width": width, "draw_color": graphics.Color(*MESSAGE_COLORS[message["color"]])}
-
-
-def draw_message(canvas, screen, elapsed):
-    # Short messages sit centered for MESSAGE_HOLD_SECONDS; longer ones scroll across once.
-    # Returns False once the message is done.
-    if screen["width"] <= options.cols:
-        graphics.DrawText(canvas, wait_time_font, (options.cols - screen["width"]) // 2, 21,
-                          screen["draw_color"], screen["text"])
-        return elapsed < MESSAGE_HOLD_SECONDS
-    left = options.cols - int(elapsed * MESSAGE_SCROLL_SPEED)
-    if left + screen["width"] < 0:
-        return False
-    graphics.DrawText(canvas, wait_time_font, left, 21, screen["draw_color"], screen["text"])
-    return True
-
-
 def get_spotify_access_token():
     global spotify_access_token
     global spotify_token_expires_at
@@ -1785,8 +1685,7 @@ STARTED_AT = time.monotonic()
 schedule_nfl_update()
 threading.Thread(target=nfl_week_loop, name="nfl-week", daemon=True).start()
 try:
-    web.start_server(WEB_PORT, WEB_PIN, MESSAGE_COLORS, add_message, list_messages, delete_message,
-                     os.path.join(APP_DIR, "web", "index.html"),
+    web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
                      SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
@@ -1794,8 +1693,6 @@ except Exception as e:
     log_error("Control page", e)
 td_alert = None
 td_alert_start = 0.0
-message_screen = None
-message_start = 0.0
 music_track = None
 sports_ticker = None
 sports_ticker_user = None
@@ -1835,25 +1732,8 @@ try:
             td_alert = None
             cycle_start = 0.0  # force a fresh cycle below
 
-        # Messages from the phone page come next: after touchdowns, never during the ticker
-        if message_screen is None:
-            message = next_message_due()
-            if message is not None:
-                message_screen = build_message_screen(message)
-                message_start = time.monotonic()
-        if message_screen is not None:
-            offscreen_canvas.brightness = brightness
-            offscreen_canvas.Clear()
-            if draw_message(offscreen_canvas, message_screen, time.monotonic() - message_start):
-                offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
-                time.sleep(NFL_TICKER_FRAME)
-                continue
-            finish_message(message_screen["id"])
-            message_screen = None
-            cycle_start = 0.0  # force a fresh cycle below
-
-        # Sports mode: one ticker with this week's games, then our fantasy matchups. Touchdowns and
-        # messages above still interrupt; the loop picks up where it left off. With nothing loaded
+        # Sports mode: one ticker with this week's games, then our fantasy matchups. Touchdown alerts
+        # above still interrupt; the loop picks up where it left off. With nothing loaded
         # yet it falls through to the normal screens.
         week_games = nfl_week_games
         matchups = fantasy_matchups if settings["fantasy_enabled"] else []
