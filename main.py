@@ -51,9 +51,7 @@ FRAME_INTERVAL = 0.115625  # seconds per scroll pixel
 ARRIVAL_PAUSE = 0.25
 ARRIVAL_SECONDS = 6
 
-# While Spotify is playing, album art takes the right half and the left half
-# alternates: clock for SPOTIFY_CLOCK_SECONDS, then one bus cycle
-SPOTIFY_CLOCK_SECONDS = 8
+# Spotify is only used in music mode
 SPOTIFY_POLL_SECONDS = 10
 
 # Music mode: album art on the right, song title and artist on the left. Text too wide for the
@@ -159,7 +157,6 @@ SETTINGS_FIELDS = [
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
     {"key": "screen_off_start", "section": "Screen", "label": "Screen off at", "type": "hour"},
     {"key": "screen_off_end", "section": "Screen", "label": "Screen back on at", "type": "hour"},
-    {"key": "spotify_enabled", "section": "Features", "label": "Show album art while Spotify plays", "type": "toggle"},
     {"key": "nfl_ticker_enabled", "section": "Football", "label": "NFL scores ticker on game days", "type": "toggle"},
     {"key": "fantasy_enabled", "section": "Football", "label": "Fantasy matchups in sports mode", "type": "toggle"},
     {"key": "favorite_team", "section": "Football", "label": "Favorite team", "type": "choice",
@@ -174,13 +171,13 @@ DEFAULT_SETTINGS = {
     "screen_off_enabled": SCREEN_OFF_START_HOUR != SCREEN_OFF_END_HOUR,
     "screen_off_start": SCREEN_OFF_START_HOUR,
     "screen_off_end": SCREEN_OFF_END_HOUR,
-    "spotify_enabled": True,
     "nfl_ticker_enabled": True,
     "fantasy_enabled": True,
     "favorite_team": FAVORITE_TEAM,
     "touchdown_alerts": "favorite" if TD_ALERTS_FAVORITE_ONLY else "all",
 }
 settings_lock = threading.Lock()
+RETIRED_SETTINGS = {"spotify_enabled"}  # older settings.json files may still have these; skipped quietly
 
 
 def validate_setting(key, value):
@@ -210,6 +207,8 @@ def load_settings():
             saved = json.load(f)
         if isinstance(saved, dict):
             for key, value in saved.items():
+                if key in RETIRED_SETTINGS:
+                    continue
                 if validate_setting(key, value) is None:
                     loaded[key] = value
                 else:
@@ -1320,8 +1319,9 @@ def clear_spotify_now_playing():
 
 
 def spotify_active():
+    # Spotify is only checked while the sign is in music mode
     # Music mode always needs Spotify; otherwise it follows the album art switch
-    return settings["spotify_enabled"] or settings["display_mode"] == "music"
+    return settings["display_mode"] == "music"
 
 
 def fetch_spotify_now_playing():
@@ -1772,16 +1772,14 @@ next_nfl_ticker_at = STARTED_AT + NFL_TICKER_FIRST_DELAY
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
 has_buses = bool(arrival_times)
-showing_spotify = False
 
 try:
     while True:
         art = spotify_album_art
-        spotify_now = settings["spotify_enabled"] and spotify_is_playing and art is not None
         music_mode = settings["display_mode"] == "music"
 
-        # A song playing keeps the screen on overnight (dimmed), in either mode
-        brightness = get_brightness(spotify_now or (music_mode and spotify_is_playing and art is not None))
+        # In music mode, a song playing keeps the screen on overnight (dimmed)
+        brightness = get_brightness(music_mode and spotify_is_playing and art is not None)
         if brightness == 0:
             offscreen_canvas.Clear()
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
@@ -1871,11 +1869,9 @@ try:
             cycle_start = 0.0  # start a fresh cycle if music mode ends
             continue
 
-        cycle_seconds = bus_screen["cycle_seconds"] + (SPOTIFY_CLOCK_SECONDS if spotify_now else 0)
         elapsed = time.monotonic() - cycle_start
-        if spotify_now != showing_spotify or elapsed >= cycle_seconds:
-            # Restart the cycle on a fresh snapshot (also when Spotify starts or stops)
-            showing_spotify = spotify_now
+        if elapsed >= bus_screen["cycle_seconds"]:
+            # Restart the cycle on a fresh snapshot
             cycle_start = time.monotonic()
             bus_screen = get_bus_screen()
             has_buses = bool(arrival_times)
@@ -1891,21 +1887,12 @@ try:
         stale = bus_data_is_stale()
         offscreen_canvas.brightness = brightness
         offscreen_canvas.Clear()
-        if showing_spotify:
-            # Left half: clock, then the bus cycle; right half: album art
-            if elapsed < SPOTIFY_CLOCK_SECONDS or not has_buses:
-                draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
-            else:
-                draw_bus(offscreen_canvas, bus_screen, elapsed - SPOTIFY_CLOCK_SECONDS, 0)
-                if stale:
-                    draw_stale_dot(offscreen_canvas, 0)
-            draw_spotify_art(offscreen_canvas, art)
-        else:
-            draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
-            if has_buses:
-                draw_bus(offscreen_canvas, bus_screen, elapsed, 32)
-            if stale:
-                draw_stale_dot(offscreen_canvas, 32)
+        # Normal mode: clock on the left, buses on the right
+        draw_clock_left(offscreen_canvas, datetime.now().second % 2 == 0)
+        if has_buses:
+            draw_bus(offscreen_canvas, bus_screen, elapsed, 32)
+        if stale:
+            draw_stale_dot(offscreen_canvas, 32)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
         time.sleep(FRAME_INTERVAL)
 
