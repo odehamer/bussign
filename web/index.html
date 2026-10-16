@@ -87,7 +87,7 @@
   .mode-now { display: block; margin-top: 2px; color: var(--accent); }
 
   .tabs {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
   }
   .tabs button {
@@ -124,6 +124,46 @@
   .switch input:checked + span { background: var(--accent); }
   .switch input:checked + span::after { transform: translateX(20px); }
   .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Pixel painter */
+  .paint-wrap { position: relative; }
+  #paint {
+    display: block; width: 100%; aspect-ratio: 2 / 1; border-radius: 8px; background: #000;
+    touch-action: none; cursor: crosshair;
+  }
+  .tools, .palette, .draw-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .tool {
+    flex: 1; min-width: 60px; padding: 10px 6px; border-radius: 10px; border: 1px solid var(--panel-edge);
+    background: #0f1115; color: var(--muted); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .tool[aria-pressed="true"] { border-color: var(--accent); color: var(--text); background: #0f1d1f; }
+  .color {
+    width: 34px; height: 34px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0;
+    box-shadow: inset 0 0 0 2px rgba(0,0,0,0.35);
+  }
+  .color[aria-pressed="true"] { border-color: var(--text); transform: scale(1.1); }
+  .custom-color { position: relative; width: 34px; height: 34px; }
+  .custom-color input {
+    position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 50%;
+    background: none; cursor: pointer;
+  }
+  .draw-actions button {
+    flex: 1; padding: 11px; border-radius: 10px; border: 1px solid var(--panel-edge); background: #0f1115;
+    color: var(--text); font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .draw-actions button.danger { color: var(--danger); border-color: #3a2328; }
+  .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .thumb { position: relative; }
+  .thumb button.open {
+    display: block; width: 100%; padding: 0; border: 1px solid var(--panel-edge); border-radius: 6px;
+    background: #000; cursor: pointer; overflow: hidden;
+  }
+  .thumb img { display: block; width: 100%; aspect-ratio: 2 / 1; image-rendering: pixelated; }
+  .thumb button.delete {
+    position: absolute; top: -8px; right: -8px; width: 24px; height: 24px; border-radius: 50%; border: 0;
+    background: #2a2e35; color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+  }
+  .empty { color: var(--muted); font-size: 14px; margin: 0; }
 </style>
 </head>
 <body>
@@ -141,6 +181,7 @@
   <div id="app">
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tab-btn-sign" aria-selected="true" aria-controls="tab-sign">Sign</button>
+      <button type="button" role="tab" id="tab-btn-draw" aria-selected="false" aria-controls="tab-draw">Draw</button>
       <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
     </div>
 
@@ -173,11 +214,39 @@
             <span><span class="mode-name">Aquarium</span><span class="mode-desc">Fish, seaweed and bubbles in a little tank</span></span>
           </label>
           <label class="mode">
+            <input type="radio" name="mode" value="drawing">
+            <span><span class="mode-name">Drawing</span><span class="mode-desc">Your pixel art from the Draw tab</span></span>
+          </label>
+          <label class="mode">
             <input type="radio" name="mode" value="auto">
             <span><span class="mode-name">Auto</span><span class="mode-desc">Music while Spotify plays, sports during live games, otherwise normal<span class="mode-now" id="auto-now"></span></span></span>
           </label>
         </fieldset>
         <div class="status" id="mode-status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+
+    <div id="tab-draw" role="tabpanel" aria-labelledby="tab-btn-draw" hidden>
+      <section>
+        <h2>Draw on the sign</h2>
+        <canvas id="paint" width="640" height="320" role="img" aria-label="Drawing canvas, 64 by 32 pixels"></canvas>
+        <div class="tools" role="group" aria-label="Tool">
+          <button type="button" class="tool" data-tool="pen" aria-pressed="true">Pen</button>
+          <button type="button" class="tool" data-tool="brush" aria-pressed="false">Brush</button>
+          <button type="button" class="tool" data-tool="eraser" aria-pressed="false">Eraser</button>
+          <button type="button" class="tool" data-tool="fill" aria-pressed="false">Fill</button>
+        </div>
+        <div class="palette" id="palette" role="group" aria-label="Color"></div>
+        <div class="draw-actions">
+          <button type="button" id="draw-save">Save</button>
+          <button type="button" class="danger" id="draw-clear">Clear</button>
+        </div>
+        <div class="status" id="draw-status" role="status" aria-live="polite"></div>
+      </section>
+      <section>
+        <h2>Saved drawings</h2>
+        <div class="gallery" id="gallery"></div>
+        <p class="empty" id="gallery-empty">Nothing saved yet. Tap Save to keep a drawing.</p>
       </section>
     </div>
 
@@ -228,13 +297,15 @@
 
   // ---- Tabs ----
   function showTab(name) {
-    ["sign", "settings"].forEach((tab) => {
+    ["sign", "draw", "settings"].forEach((tab) => {
       $("tab-" + tab).hidden = tab !== name;
       $("tab-btn-" + tab).setAttribute("aria-selected", String(tab === name));
     });
     if (name === "settings") loadSettings();
     if (name === "sign") { loadMode(); updateLive(); }
+    if (name === "draw") { loadDrawing(); loadGallery(); }
   }
+  $("tab-btn-draw").addEventListener("click", () => showTab("draw"));
   $("tab-btn-sign").addEventListener("click", () => showTab("sign"));
   $("tab-btn-settings").addEventListener("click", () => showTab("settings"));
 
@@ -242,7 +313,7 @@
   const modeInputs = () => document.querySelectorAll('#modes input[name="mode"]');
   let modeSaving = false;
 
-  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports" };
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", aquarium: "Aquarium", drawing: "Drawing" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
@@ -460,6 +531,257 @@
     updateLive();
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) updateLive(); });
+
+  // ---- Pixel painter ----
+  const W = 64, H = 32;
+  const PALETTE = ["#ffffff", "#ff2a2a", "#ff8c00", "#ffd800", "#33dd44", "#00c8ff", "#2255ff",
+                   "#b040ff", "#ff40b0", "#8b4513", "#808080", "#000000"];
+  const paintCanvas = $("paint");
+  const paintContext = paintCanvas.getContext("2d");
+  const art = new Uint8Array(W * H * 3);
+  let tool = "pen";
+  let brushColor = [255, 255, 255];
+  let painting = false;
+  let lastCell = null;
+  const pendingPixels = new Map();
+  let flushTimer = null;
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function setDrawStatus(text, isError) {
+    $("draw-status").textContent = text;
+    $("draw-status").classList.toggle("error", !!isError);
+  }
+
+  function drawCell(x, y) {
+    const cell = paintCanvas.width / W;
+    const i = (y * W + x) * 3;
+    const lit = art[i] || art[i + 1] || art[i + 2];
+    paintContext.fillStyle = "#000";
+    paintContext.fillRect(x * cell, y * cell, cell, cell);
+    paintContext.fillStyle = lit ? `rgb(${art[i]},${art[i + 1]},${art[i + 2]})` : "#181b20";
+    paintContext.beginPath();
+    paintContext.arc((x + 0.5) * cell, (y + 0.5) * cell, cell * 0.42, 0, Math.PI * 2);
+    paintContext.fill();
+  }
+
+  function drawAll() {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) drawCell(x, y);
+  }
+
+  function setCell(x, y, rgb) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    const i = (y * W + x) * 3;
+    if (art[i] === rgb[0] && art[i + 1] === rgb[1] && art[i + 2] === rgb[2]) return;
+    art.set(rgb, i);
+    drawCell(x, y);
+    pendingPixels.set(y * W + x, [x, y, rgb[0], rgb[1], rgb[2]]);
+    if (!flushTimer) flushTimer = setTimeout(flushPixels, 80);
+  }
+
+  async function flushPixels() {
+    // Send strokes in small batches so the sign follows along while you draw
+    flushTimer = null;
+    const batch = [...pendingPixels.values()];
+    pendingPixels.clear();
+    for (let i = 0; i < batch.length; i += 500) {
+      try {
+        await api("POST", "/api/drawing/pixels", { pixels: batch.slice(i, i + 500) });
+        setDrawStatus("");
+      } catch (e) {
+        setDrawStatus(e.message, true);
+      }
+    }
+  }
+
+  function stamp(x, y) {
+    const rgb = tool === "eraser" ? [0, 0, 0] : brushColor;
+    const size = tool === "pen" ? 1 : 2;
+    for (let dy = 0; dy < size; dy++) for (let dx = 0; dx < size; dx++) setCell(x + dx, y + dy, rgb);
+  }
+
+  function line(a, b) {
+    // Fill in the cells between two pointer positions so fast strokes stay connected
+    let [x0, y0] = a; const [x1, y1] = b;
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    while (true) {
+      stamp(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  function cellAt(event) {
+    const rect = paintCanvas.getBoundingClientRect();
+    return [Math.floor((event.clientX - rect.left) / rect.width * W), Math.floor((event.clientY - rect.top) / rect.height * H)];
+  }
+
+  function toBase64(bytes) {
+    let text = "";
+    for (let i = 0; i < bytes.length; i += 4096) text += String.fromCharCode(...bytes.subarray(i, i + 4096));
+    return btoa(text);
+  }
+
+  async function sendWholeDrawing() {
+    pendingPixels.clear();
+    try {
+      await api("POST", "/api/drawing", { image: toBase64(art) });
+      setDrawStatus("");
+    } catch (e) {
+      setDrawStatus(e.message, true);
+    }
+  }
+
+  function fill(x, y) {
+    // Paint-bucket: recolor the connected area of the same color
+    const start = (y * W + x) * 3;
+    const target = [art[start], art[start + 1], art[start + 2]];
+    if (target.every((v, k) => v === brushColor[k])) return;
+    const stack = [[x, y]];
+    while (stack.length) {
+      const [cx, cy] = stack.pop();
+      if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
+      const i = (cy * W + cx) * 3;
+      if (art[i] !== target[0] || art[i + 1] !== target[1] || art[i + 2] !== target[2]) continue;
+      art.set(brushColor, i);
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+    drawAll();
+    sendWholeDrawing();
+  }
+
+  paintCanvas.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const cell = cellAt(event);
+    if (tool === "fill") { fill(...cell); return; }
+    painting = true;
+    lastCell = cell;
+    paintCanvas.setPointerCapture(event.pointerId);
+    stamp(...cell);
+  });
+  paintCanvas.addEventListener("pointermove", (event) => {
+    if (!painting) return;
+    const cell = cellAt(event);
+    if (cell[0] !== lastCell[0] || cell[1] !== lastCell[1]) { line(lastCell, cell); lastCell = cell; }
+  });
+  const endStroke = () => { painting = false; lastCell = null; };
+  paintCanvas.addEventListener("pointerup", endStroke);
+  paintCanvas.addEventListener("pointercancel", endStroke);
+
+  document.querySelectorAll(".tool").forEach((button) => {
+    button.addEventListener("click", () => {
+      tool = button.dataset.tool;
+      document.querySelectorAll(".tool").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
+    });
+  });
+
+  function renderPalette() {
+    const palette = $("palette");
+    const pick = (button, rgb) => {
+      brushColor = rgb;
+      palette.querySelectorAll(".color").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
+      if (tool === "eraser") document.querySelector('.tool[data-tool="pen"]').click();
+    };
+    PALETTE.forEach((hex, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "color";
+      button.style.background = hex;
+      button.setAttribute("aria-label", hex === "#000000" ? "black (off)" : hex);
+      button.setAttribute("aria-pressed", String(index === 0));
+      button.addEventListener("click", () => pick(button, hexToRgb(hex)));
+      palette.appendChild(button);
+    });
+    const custom = document.createElement("label");
+    custom.className = "custom-color";
+    custom.innerHTML = '<input type="color" value="#00ffaa" aria-label="Custom color">';
+    custom.querySelector("input").addEventListener("input", (event) => {
+      pick(null, hexToRgb(event.target.value));
+    });
+    palette.appendChild(custom);
+  }
+
+  async function loadDrawing() {
+    try {
+      const data = await api("GET", "/api/drawing");
+      const bytes = Uint8Array.from(atob(data.image), (c) => c.charCodeAt(0));
+      art.set(bytes);
+      drawAll();
+    } catch (e) {
+      if (e.message !== "PIN required") setDrawStatus("Can't reach the sign", true);
+    }
+  }
+
+  async function fetchPngUrl(path) {
+    const response = await fetch(path, { headers: { "X-Pin": pin }, cache: "no-store" });
+    if (!response.ok) throw new Error(response.status);
+    return URL.createObjectURL(await response.blob());
+  }
+
+  async function loadGallery() {
+    try {
+      const data = await api("GET", "/api/drawings");
+      const gallery = $("gallery");
+      gallery.querySelectorAll("img").forEach((img) => URL.revokeObjectURL(img.src));
+      gallery.innerHTML = "";
+      $("gallery-empty").hidden = data.drawings.length > 0;
+      for (const id of data.drawings) {
+        const item = document.createElement("div");
+        item.className = "thumb";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "open";
+        open.setAttribute("aria-label", "Show this drawing on the sign");
+        const img = document.createElement("img");
+        img.alt = "";
+        open.appendChild(img);
+        open.addEventListener("click", async () => {
+          try {
+            await api("POST", `/api/drawings/${id}/load`, {});
+            await loadDrawing();
+            setDrawStatus("On the sign");
+          } catch (e) { setDrawStatus(e.message, true); }
+        });
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "delete";
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "Delete this saved drawing");
+        remove.addEventListener("click", async () => {
+          try { await api("DELETE", `/api/drawings/${id}`); loadGallery(); } catch (e) { setDrawStatus(e.message, true); }
+        });
+        item.append(open, remove);
+        gallery.appendChild(item);
+        fetchPngUrl(`/api/drawings/${id}.png`).then((url) => { img.src = url; }).catch(() => {});
+      }
+    } catch (e) {
+      if (e.message !== "PIN required") setDrawStatus("Can't reach the sign", true);
+    }
+  }
+
+  $("draw-save").addEventListener("click", async () => {
+    await flushPixels();
+    try {
+      await api("POST", "/api/drawings", {});
+      setDrawStatus("Saved");
+      loadGallery();
+    } catch (e) { setDrawStatus(e.message, true); }
+  });
+  $("draw-clear").addEventListener("click", () => {
+    art.fill(0);
+    drawAll();
+    sendWholeDrawing();
+  });
+
+  renderPalette();
+  drawAll();
 
   loadMode();
   startLive();

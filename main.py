@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from PIL import Image, ImageOps
 import web
 import aquarium
+import drawing
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
@@ -138,7 +139,7 @@ NFL_TEAMS = [
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
      "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
-                 ["aquarium", "Aquarium"], ["auto", "Auto"]]},
+                 ["aquarium", "Aquarium"], ["drawing", "Drawing"], ["auto", "Auto"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
@@ -1758,10 +1759,19 @@ offscreen_canvas = matrix.CreateFrameCanvas()  # Create ONCE and reuse
 
 STARTED_AT = time.monotonic()
 
+
+def show_drawing():
+    # Editing the drawing from the control page puts it on the sign
+    if settings["display_mode"] != "drawing":
+        update_settings({"display_mode": "drawing"})
+
+
+painting = drawing.Drawing(os.path.join(APP_DIR, "drawings"), options.cols, options.rows, on_edit=show_drawing)
+
 # Control page first, so it's up within seconds of a restart even if a data source is slow
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
-                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode)
+                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page
@@ -1822,6 +1832,15 @@ try:
                 continue
             td_alert = None
             cycle_start = 0.0  # force a fresh cycle below
+
+        # Drawing mode: whatever's been painted from the control page
+        if mode == "drawing":
+            offscreen_canvas.brightness = brightness
+            offscreen_canvas.SetImage(painting.image(), 0, 0)
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(NFL_TICKER_FRAME)
+            cycle_start = 0.0  # start a fresh cycle if drawing mode ends
+            continue
 
         # Aquarium mode: fish, seaweed and bubbles
         if mode == "aquarium":

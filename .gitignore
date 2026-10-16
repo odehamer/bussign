@@ -12,3 +12,6 @@ __pycache__/
 # Settings saved from the control page
 settings.json
 settings.json.tmp
+
+# Pixel painter drawings saved from the control page
+drawings/
