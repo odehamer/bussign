@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import time
 import math
 import io
+import json
 import re
 from collections import deque
 from google.protobuf.message import Message
@@ -52,6 +53,7 @@ SPOTIFY_CLOCK_SECONDS = 8
 SPOTIFY_POLL_SECONDS = 10
 
 # Brightness (1-100): daytime runs from 30 min before sunrise to 30 min after sunset
+# These are defaults: settings changed on the control page are saved to settings.json and win.
 DAY_BRIGHTNESS = 75
 NIGHT_BRIGHTNESS = 20
 # Screen is blank from SCREEN_OFF_START_HOUR to SCREEN_OFF_END_HOUR (24h clock) unless Spotify is playing
@@ -111,6 +113,123 @@ NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between game
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
 NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
 
+# Live settings: defaults from the constants above, overridden by settings.json (written by the
+# control page). The display loop reads `settings` every frame, so changes apply immediately.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+NFL_TEAMS = [
+    ("ARI", "Arizona Cardinals"), ("ATL", "Atlanta Falcons"), ("BAL", "Baltimore Ravens"),
+    ("BUF", "Buffalo Bills"), ("CAR", "Carolina Panthers"), ("CHI", "Chicago Bears"),
+    ("CIN", "Cincinnati Bengals"), ("CLE", "Cleveland Browns"), ("DAL", "Dallas Cowboys"),
+    ("DEN", "Denver Broncos"), ("DET", "Detroit Lions"), ("GB", "Green Bay Packers"),
+    ("HOU", "Houston Texans"), ("IND", "Indianapolis Colts"), ("JAX", "Jacksonville Jaguars"),
+    ("KC", "Kansas City Chiefs"), ("LV", "Las Vegas Raiders"), ("LAC", "Los Angeles Chargers"),
+    ("LAR", "Los Angeles Rams"), ("MIA", "Miami Dolphins"), ("MIN", "Minnesota Vikings"),
+    ("NE", "New England Patriots"), ("NO", "New Orleans Saints"), ("NYG", "New York Giants"),
+    ("NYJ", "New York Jets"), ("PHI", "Philadelphia Eagles"), ("PIT", "Pittsburgh Steelers"),
+    ("SF", "San Francisco 49ers"), ("SEA", "Seattle Seahawks"), ("TB", "Tampa Bay Buccaneers"),
+    ("TEN", "Tennessee Titans"), ("WSH", "Washington Commanders"),
+]
+SETTINGS_FIELDS = [
+    {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
+    {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
+    {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
+    {"key": "screen_off_start", "section": "Screen", "label": "Screen off at", "type": "hour"},
+    {"key": "screen_off_end", "section": "Screen", "label": "Screen back on at", "type": "hour"},
+    {"key": "spotify_enabled", "section": "Features", "label": "Show album art while Spotify plays", "type": "toggle"},
+    {"key": "nfl_ticker_enabled", "section": "Football", "label": "NFL scores ticker on game days", "type": "toggle"},
+    {"key": "favorite_team", "section": "Football", "label": "Favorite team", "type": "choice",
+     "options": [["", "None"]] + [list(team) for team in NFL_TEAMS]},
+    {"key": "touchdown_alerts", "section": "Football", "label": "Touchdown alerts", "type": "choice",
+     "options": [["all", "All teams"], ["favorite", "Favorite team only"], ["off", "Off"]]},
+]
+DEFAULT_SETTINGS = {
+    "day_brightness": DAY_BRIGHTNESS,
+    "night_brightness": NIGHT_BRIGHTNESS,
+    "screen_off_enabled": SCREEN_OFF_START_HOUR != SCREEN_OFF_END_HOUR,
+    "screen_off_start": SCREEN_OFF_START_HOUR,
+    "screen_off_end": SCREEN_OFF_END_HOUR,
+    "spotify_enabled": True,
+    "nfl_ticker_enabled": True,
+    "favorite_team": FAVORITE_TEAM,
+    "touchdown_alerts": "favorite" if TD_ALERTS_FAVORITE_ONLY else "all",
+}
+settings_lock = threading.Lock()
+
+
+def validate_setting(key, value):
+    # Returns an error message, or None if the value is allowed
+    field = next((f for f in SETTINGS_FIELDS if f["key"] == key), None)
+    if field is None:
+        return f"Unknown setting {key!r}"
+    kind = field["type"]
+    if kind in ("range", "hour"):
+        low, high = (field["min"], field["max"]) if kind == "range" else (0, 23)
+        if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+            return f"{field['label']} must be a whole number from {low} to {high}"
+    elif kind == "toggle":
+        if not isinstance(value, bool):
+            return f"{field['label']} must be on or off"
+    elif kind == "choice":
+        if value not in [option[0] for option in field["options"]]:
+            return f"{field['label']} isn't one of the choices"
+    return None
+
+
+def load_settings():
+    # Defaults, overridden by any valid values saved in settings.json
+    loaded = {}
+    try:
+        with open(SETTINGS_PATH) as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            for key, value in saved.items():
+                if validate_setting(key, value) is None:
+                    loaded[key] = value
+                else:
+                    print(f"Ignoring invalid saved setting {key}={value!r}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Couldn't read {SETTINGS_PATH}, using defaults: {e}")
+    return {**DEFAULT_SETTINGS, **loaded}
+
+
+def get_settings():
+    return dict(settings)
+
+
+def update_settings(changes):
+    # Called from the web server; returns (new settings, None) or (None, error message)
+    global settings
+    if not isinstance(changes, dict) or not changes:
+        return None, "No settings to change"
+    for key, value in changes.items():
+        error = validate_setting(key, value)
+        if error:
+            return None, error
+    with settings_lock:
+        new_settings = {**settings, **changes}
+        # Write to a temp file and swap it in, so a power cut never leaves a half-written file
+        try:
+            with open(SETTINGS_PATH + ".tmp", "w") as f:
+                json.dump(new_settings, f, indent=2)
+            os.replace(SETTINGS_PATH + ".tmp", SETTINGS_PATH)
+        except OSError as e:
+            print(f"Couldn't save settings (still applied until restart): {e}")
+        settings = new_settings
+    print("Settings changed: " + ", ".join(f"{k}={v}" for k, v in changes.items()))
+    return dict(new_settings), None
+
+
+settings = load_settings()
+
+
+def is_favorite(game):
+    team = settings["favorite_team"]
+    return bool(team) and team in (game["away"]["abbr"], game["home"]["abbr"])
+
+
 # Configure the LED matrix
 options = RGBMatrixOptions()
 options.rows = 32
@@ -119,7 +238,7 @@ options.chain_length = 1
 options.parallel = 1
 options.hardware_mapping = 'regular'
 options.gpio_slowdown = 2
-options.brightness = DAY_BRIGHTNESS
+options.brightness = settings["day_brightness"]
 ## NECESSARY!!!!! VVVVV
 options.hardware_mapping = 'adafruit-hat'
 # Stay root after init: /home/pi isn't readable by the 'daemon' user the
@@ -441,7 +560,6 @@ def parse_nfl_games(data):
                 # logoDark is ESPN's version for dark backgrounds
                 "logo_url": team.get("logoDark") or team.get("logo") or "",
             }
-        game["favorite"] = FAVORITE_TEAM in (game["away"]["abbr"], game["home"]["abbr"])
         games.append(game)
     return games
 
@@ -509,7 +627,8 @@ def check_for_touchdowns(games):
             if (play.get("scoringType") or {}).get("name") != "touchdown":
                 continue
             abbr = (play.get("team") or {}).get("abbreviation", "")
-            if TD_ALERTS_FAVORITE_ONLY and abbr != FAVORITE_TEAM:
+            alerts = settings["touchdown_alerts"]
+            if alerts == "off" or (alerts == "favorite" and abbr != settings["favorite_team"]):
                 continue
             team = teams.get(abbr)
             opponent = next((t for a, t in teams.items() if a != abbr), None)
@@ -524,7 +643,7 @@ def check_for_touchdowns(games):
                 "scorer": scorer,
                 "description": description,
                 "queued_at": time.monotonic(),
-                "favorite": abbr == FAVORITE_TEAM,
+                "favorite": bool(abbr) and abbr == settings["favorite_team"],
             })
             print(f"Touchdown {abbr}: {description} ({team_score}-{opponent_score})")
         track["checked_total"] = latest_total
@@ -620,7 +739,7 @@ def get_nfl_game_pause(game, game_count):
     # Seconds to hold on a game once it's centered in the ticker
     if game_count == 1:
         return NFL_SINGLE_GAME_PAUSE
-    return NFL_FAVORITE_PAUSE if game["favorite"] else NFL_TICKER_PAUSE
+    return NFL_FAVORITE_PAUSE if is_favorite(game) else NFL_TICKER_PAUSE
 
 
 def build_nfl_ticker(games):
@@ -659,7 +778,7 @@ def build_nfl_ticker(games):
     add_text("NFL", nfl_label_color, wait_time_font)
     stops = []
     # Favorite team's game first; the rest keep ESPN's order
-    for game in sorted(games, key=lambda g: not g["favorite"]):
+    for game in sorted(games, key=lambda g: not is_favorite(g)):
         add_separator()
         game_start = x
         for i, side in enumerate(("away", "home")):
@@ -674,9 +793,9 @@ def build_nfl_ticker(games):
         segments.append({"x": game_start + (x - game_start - status_width) // 2, "width": status_width,
                          "kind": "text", "text": game["status"], "color": nfl_status_color,
                          "font": nfl_status_font, "y": NFL_STATUS_BASELINE})
-        if game["favorite"]:
+        if is_favorite(game):
             # Underline the favorite's game in its team color
-            favorite = game["away"] if game["away"]["abbr"] == FAVORITE_TEAM else game["home"]
+            favorite = game["away"] if game["away"]["abbr"] == settings["favorite_team"] else game["home"]
             segments.append({"x": game_start, "width": x - game_start, "kind": "underline",
                              "color": favorite["color"]})
         # Scroll distance at which this game sits centered on screen, and how long to hold there
@@ -923,6 +1042,10 @@ def fetch_spotify_now_playing():
     global spotify_progress_at
     global spotify_track_name
     global spotify_artist_name
+
+    if not settings["spotify_enabled"]:
+        clear_spotify_now_playing()
+        return
 
     token = get_spotify_access_token()
     if not token:
@@ -1194,18 +1317,21 @@ def is_daytime(now):
 
 
 def in_screen_off_hours(now):
-    if SCREEN_OFF_START_HOUR <= SCREEN_OFF_END_HOUR:
-        return SCREEN_OFF_START_HOUR <= now.hour < SCREEN_OFF_END_HOUR
+    if not settings["screen_off_enabled"]:
+        return False
+    start, end = settings["screen_off_start"], settings["screen_off_end"]
+    if start <= end:
+        return start <= now.hour < end
     # Window wraps past midnight, e.g. 23 -> 6
-    return now.hour >= SCREEN_OFF_START_HOUR or now.hour < SCREEN_OFF_END_HOUR
+    return now.hour >= start or now.hour < end
 
 
 def get_brightness(spotify_playing):
     # 0 means the screen should be off
     now = datetime.now()
     if in_screen_off_hours(now):
-        return NIGHT_BRIGHTNESS if spotify_playing else 0
-    return DAY_BRIGHTNESS if is_daytime(now) else NIGHT_BRIGHTNESS
+        return settings["night_brightness"] if spotify_playing else 0
+    return settings["day_brightness"] if is_daytime(now) else settings["night_brightness"]
 
 
 def draw_umbrella(canvas):
@@ -1303,7 +1429,8 @@ STARTED_AT = time.monotonic()
 schedule_nfl_update()
 try:
     web.start_server(WEB_PORT, WEB_PIN, MESSAGE_COLORS, add_message, list_messages, delete_message,
-                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html"))
+                     os.path.join(APP_DIR, "web", "index.html"),
+                     SETTINGS_FIELDS, get_settings, update_settings)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page
@@ -1323,7 +1450,7 @@ showing_spotify = False
 try:
     while True:
         art = spotify_album_art
-        spotify_now = spotify_is_playing and art is not None
+        spotify_now = settings["spotify_enabled"] and spotify_is_playing and art is not None
 
         brightness = get_brightness(spotify_now)
         if brightness == 0:
@@ -1389,7 +1516,7 @@ try:
 
             # Run the NFL ticker between cycles so it never cuts off the bus screens
             games = get_todays_nfl_games()
-            if games and time.monotonic() >= next_nfl_ticker_at:
+            if settings["nfl_ticker_enabled"] and games and time.monotonic() >= next_nfl_ticker_at:
                 nfl_ticker = build_nfl_ticker(games)
                 nfl_ticker_start = time.monotonic()
                 continue

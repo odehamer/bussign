@@ -98,6 +98,41 @@
   }
   .pin-row button { width: auto; padding: 12px 18px; }
   [hidden] { display: none !important; }
+
+  .tabs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
+    background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
+  }
+  .tabs button {
+    padding: 10px; border: 0; border-radius: 9px; background: transparent; color: var(--muted);
+    font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { background: #23272e; color: var(--text); }
+
+  .setting { padding: 12px 0; border-top: 1px solid var(--panel-edge); }
+  .setting:first-of-type { border-top: 0; padding-top: 0; }
+  .setting.disabled { opacity: 0.45; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .setting label, .setting .label { font-size: 15px; }
+  .value { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 15px; }
+  input[type="range"] { width: 100%; margin-top: 10px; accent-color: var(--accent); }
+  select {
+    padding: 9px 10px; border-radius: 10px; border: 1px solid var(--panel-edge);
+    background: #0f1115; color: var(--text); font: inherit; font-size: 15px; max-width: 60%;
+  }
+  .switch { position: relative; width: 50px; height: 30px; flex: none; }
+  .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; cursor: pointer; }
+  .switch span {
+    position: absolute; inset: 0; border-radius: 15px; background: #3a3f47; transition: background 0.15s;
+    pointer-events: none;
+  }
+  .switch span::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+    background: #fff; transition: transform 0.15s;
+  }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(20px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -113,6 +148,12 @@
   </section>
 
   <div id="app">
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-btn-messages" aria-selected="true" aria-controls="tab-messages">Message</button>
+      <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
+    </div>
+
+    <div id="tab-messages" role="tabpanel" aria-labelledby="tab-btn-messages">
     <section>
       <h2>Send a message</h2>
       <div class="sign" aria-hidden="true"><div class="sign-text fits" id="preview">HELLO</div></div>
@@ -132,6 +173,12 @@
       <p class="empty" id="empty">Nothing queued.</p>
       <button class="secondary" type="button" id="clear" hidden>Clear all</button>
     </section>
+    </div>
+
+    <div id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings" hidden>
+      <div id="settings"></div>
+      <div class="status" id="settings-status" role="status" aria-live="polite"></div>
+    </div>
   </div>
 
 <script>
@@ -285,6 +332,123 @@
     savePin($("pin").value);
     try { await api("GET", "/api/messages"); refresh(); } catch (e) { showPin("That PIN didn't work"); }
   });
+
+  // ---- Tabs ----
+  function showTab(name) {
+    ["messages", "settings"].forEach((tab) => {
+      $("tab-" + tab).hidden = tab !== name;
+      $("tab-btn-" + tab).setAttribute("aria-selected", String(tab === name));
+    });
+    if (name === "settings") loadSettings();
+  }
+  $("tab-btn-messages").addEventListener("click", () => showTab("messages"));
+  $("tab-btn-settings").addEventListener("click", () => showTab("settings"));
+
+  // ---- Settings (rendered from the fields the sign sends) ----
+  let settingValues = {};
+
+  function hourLabel(hour) {
+    const h = hour % 12 === 0 ? 12 : hour % 12;
+    return `${h}:00 ${hour < 12 ? "AM" : "PM"}`;
+  }
+
+  function setSettingsStatus(text, isError) {
+    $("settings-status").textContent = text;
+    $("settings-status").classList.toggle("error", !!isError);
+  }
+
+  async function saveSetting(key, value) {
+    setSettingsStatus("Saving…");
+    try {
+      const data = await api("POST", "/api/settings", { [key]: value });
+      settingValues = data.values;
+      setSettingsStatus("Saved");
+      updateDependentSettings();
+    } catch (e) {
+      setSettingsStatus(e.message, true);
+      loadSettings();  // put the controls back to what the sign actually has
+    }
+  }
+
+  function updateDependentSettings() {
+    // Off/on hours only matter while overnight screen-off is turned on
+    const offEnabled = settingValues.screen_off_enabled;
+    ["screen_off_start", "screen_off_end"].forEach((key) => {
+      const row = document.querySelector(`[data-setting="${key}"]`);
+      if (!row) return;
+      row.classList.toggle("disabled", !offEnabled);
+      row.querySelector("select").disabled = !offEnabled;
+    });
+  }
+
+  function renderSettings(fields) {
+    const container = $("settings");
+    container.innerHTML = "";
+    const sections = {};
+    fields.forEach((field) => {
+      if (!sections[field.section]) {
+        const section = document.createElement("section");
+        const heading = document.createElement("h2");
+        heading.textContent = field.section;
+        section.appendChild(heading);
+        container.appendChild(section);
+        sections[field.section] = section;
+      }
+      const row = document.createElement("div");
+      row.className = "setting";
+      row.dataset.setting = field.key;
+      const id = "setting-" + field.key;
+      const value = settingValues[field.key];
+
+      if (field.type === "range") {
+        row.innerHTML = `<div class="setting-row"><label for="${id}"></label><span class="value"></span></div>
+          <input type="range" id="${id}" min="${field.min}" max="${field.max}" step="1">`;
+        const input = row.querySelector("input");
+        const shown = row.querySelector(".value");
+        input.value = value;
+        shown.textContent = value + "%";
+        input.addEventListener("input", () => { shown.textContent = input.value + "%"; });
+        input.addEventListener("change", () => saveSetting(field.key, Number(input.value)));
+      } else if (field.type === "toggle") {
+        row.innerHTML = `<div class="setting-row"><label for="${id}"></label>
+          <span class="switch"><input type="checkbox" role="switch" id="${id}"><span></span></span></div>`;
+        const input = row.querySelector("input");
+        input.checked = !!value;
+        input.addEventListener("change", () => saveSetting(field.key, input.checked));
+      } else {
+        // "hour" and "choice" are both dropdowns
+        row.innerHTML = `<div class="setting-row"><label for="${id}"></label><select id="${id}"></select></div>`;
+        const select = row.querySelector("select");
+        const options = field.type === "hour"
+          ? Array.from({ length: 24 }, (_, hour) => [hour, hourLabel(hour)])
+          : field.options;
+        options.forEach(([optionValue, label]) => {
+          const option = document.createElement("option");
+          option.value = String(optionValue);
+          option.textContent = label;
+          select.appendChild(option);
+        });
+        select.value = String(value);
+        select.addEventListener("change", () => {
+          saveSetting(field.key, field.type === "hour" ? Number(select.value) : select.value);
+        });
+      }
+      row.querySelector("label").textContent = field.label;
+      sections[field.section].appendChild(row);
+    });
+    updateDependentSettings();
+  }
+
+  async function loadSettings() {
+    try {
+      const data = await api("GET", "/api/settings");
+      settingValues = data.values;
+      renderSettings(data.fields);
+      setSettingsStatus("");
+    } catch (e) {
+      if (e.message !== "PIN required") setSettingsStatus("Can't reach the sign", true);
+    }
+  }
 
   updatePreview();
   refresh();

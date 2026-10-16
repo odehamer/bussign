@@ -1,4 +1,4 @@
-# Phone control page for the sign: serves web/index.html and a small JSON API for messages.
+# Phone control page for the sign: serves web/index.html and a small JSON API for messages and settings.
 # It only knows about the callbacks main.py hands it, never the display itself.
 import hmac
 import json
@@ -23,7 +23,8 @@ def clean_text(text):
     return " ".join(text.split())[:MAX_MESSAGE_LENGTH]
 
 
-def start_server(port, pin, colors, add_message, list_messages, delete_message, page_path):
+def start_server(port, pin, colors, add_message, list_messages, delete_message, page_path,
+                 settings_fields, get_settings, update_settings):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -62,29 +63,50 @@ def start_server(port, pin, colors, add_message, list_messages, delete_message, 
                 if self.authorized():
                     self.send_json(200, {"messages": list_messages(), "colors": list(colors),
                                          "max_length": MAX_MESSAGE_LENGTH})
+            elif self.path == "/api/settings":
+                if self.authorized():
+                    self.send_json(200, {"values": get_settings(), "fields": settings_fields})
             else:
                 self.send_json(404, {"error": "Not found"})
 
-        def do_POST(self):
-            if self.path != "/api/messages":
-                return self.send_json(404, {"error": "Not found"})
+        def read_json(self):
+            # Returns the request's JSON object, or None after sending an error response
             # Requiring JSON means other websites can't post here without a CORS preflight we never answer
             if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
-                return self.send_json(415, {"error": "Send JSON"})
+                self.send_json(415, {"error": "Send JSON"})
+                return None
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = 0
             if length <= 0 or length > MAX_BODY_BYTES:
-                return self.send_json(413, {"error": "Message too large"})
+                self.send_json(413, {"error": "Request too large"})
+                return None
             if not self.authorized():
-                return
+                return None
             try:
                 data = json.loads(self.rfile.read(length))
             except ValueError:
-                return self.send_json(400, {"error": "Invalid JSON"})
+                data = None
             if not isinstance(data, dict):
-                return self.send_json(400, {"error": "Invalid JSON"})
+                self.send_json(400, {"error": "Invalid JSON"})
+                return None
+            return data
+
+        def do_POST(self):
+            if self.path == "/api/settings":
+                data = self.read_json()
+                if data is None:
+                    return
+                values, error = update_settings(data)
+                if error:
+                    return self.send_json(400, {"error": error})
+                return self.send_json(200, {"values": values})
+            if self.path != "/api/messages":
+                return self.send_json(404, {"error": "Not found"})
+            data = self.read_json()
+            if data is None:
+                return
 
             text = clean_text(str(data.get("text", "")))
             color = data.get("color", "white")

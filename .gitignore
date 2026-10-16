@@ -8,3 +8,7 @@ __pycache__/
 
 # Leftovers from interrupted editor saves
 *.tmp.*
+
+# Settings saved from the control page
+settings.json
+settings.json.tmp
