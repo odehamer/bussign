@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from PIL import Image, ImageOps
 import web
+import aquarium
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
@@ -137,7 +138,7 @@ NFL_TEAMS = [
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
      "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
-                 ["auto", "Auto"]]},
+                 ["aquarium", "Aquarium"], ["auto", "Auto"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
@@ -1774,6 +1775,7 @@ td_alert = None
 td_alert_start = 0.0
 music_track = None
 auto_showing = None
+tank = aquarium.Aquarium()
 sports_ticker = None
 sports_ticker_user = None
 sports_start = 0.0
@@ -1820,6 +1822,15 @@ try:
                 continue
             td_alert = None
             cycle_start = 0.0  # force a fresh cycle below
+
+        # Aquarium mode: fish, seaweed and bubbles
+        if mode == "aquarium":
+            offscreen_canvas.brightness = brightness
+            tank.draw(offscreen_canvas, time.monotonic())
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(NFL_TICKER_FRAME)
+            cycle_start = 0.0  # start a fresh cycle if aquarium mode ends
+            continue
 
         # Sports mode: one ticker with this week's games, then our fantasy matchups. Touchdown alerts
         # above still interrupt; the loop picks up where it left off. With nothing loaded
