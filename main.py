@@ -13,6 +13,7 @@ from google.transit import gtfs_realtime_pb2
 import sys
 import os
 import signal
+import socket
 import threading
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -312,6 +313,7 @@ nfl_score_tracking = {}
 nfl_td_alerts = deque()  # touchdowns waiting to be shown
 nfl_logos = {}  # team abbreviation -> logo image (RGB, NFL_LOGO_SIZE square)
 current_temperature = 0
+weather_loaded = False  # the clock leaves the temperature out until the first weather update
 weather_code = 0
 sunrise_time = None
 sunset_time = None
@@ -491,6 +493,7 @@ def draw_stale_dot(canvas, x):
 
 
 def get_openmeteo_weather():
+    global weather_loaded
     global current_temperature
     global weather_code
     global sunrise_time
@@ -510,6 +513,7 @@ def get_openmeteo_weather():
         data = response.json()
 
         current_temperature = float(data['main']['temp'])
+        weather_loaded = True
         weather_code = data['weather'][0]['id']
         
         sunrise_str = data['sys']['sunrise']
@@ -1625,6 +1629,8 @@ def draw_clock_full(canvas, blink_on):
     time_width = sum(clock_font.CharacterWidth(ord(c)) for c in time_str)
     graphics.DrawText(canvas, clock_font, (options.cols - time_width) // 2, 16, default_color, time_str)
     graphics.DrawText(canvas, date_font, 2, 30, date_color, f"{now:%b} {now.day}")
+    if not weather_loaded:
+        return canvas
     temp_color = get_temp_color(temp)
     graphics.DrawText(canvas, wait_time_font, 34, 30, temp_color, f"{temp:.0f}")
     if temp < 100:
@@ -1648,7 +1654,9 @@ def draw_clock_left(canvas, blink_on):
     graphics.DrawText(canvas, date_font, 2, 17, date_color, month_str)
     graphics.DrawText(canvas, date_font, 15, 17, date_color, ",")
     graphics.DrawText(canvas, date_font, 22, 17, date_color, day_str)
-    if (temp < 100):
+    if not weather_loaded:
+        pass  # no temperature until the first weather update
+    elif (temp < 100):
         graphics.DrawText(canvas, wait_time_font, 2, 30, temp_color, f"{temp:.0f}")
         graphics.DrawText(canvas, arrival_time_font, 15, 27, temp_color, "°")
         draw_weather_icon(canvas, now, is_day, blink_on)
@@ -1721,6 +1729,25 @@ def draw_weather(canvas, is_day, is_animated):
     else:
         draw_cloud(canvas)
 
+WATCHDOG_PING_SECONDS = 5  # bustracker.service restarts us if these stop for WatchdogSec
+
+
+def sd_notify(message):
+    # Tell systemd we're alive (Type=notify + WatchdogSec in bustracker.service). Does nothing when
+    # not run by systemd.
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]  # abstract socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(address)
+            sock.sendall(message.encode())
+    except OSError:
+        pass
+
+
 # systemctl stop sends SIGTERM; exit cleanly so the matrix gets cleared
 signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
@@ -1728,14 +1755,9 @@ signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 matrix = frame.Display(RGBMatrix(options=options))
 offscreen_canvas = matrix.CreateFrameCanvas()  # Create ONCE and reuse
 
-# Start weather update scheduler
-schedule_weather_update()
-threading.Thread(target=spotify_loop, name="spotify", daemon=True).start()
-schedule_bus_update()
-
 STARTED_AT = time.monotonic()
-schedule_nfl_update()
-threading.Thread(target=nfl_week_loop, name="nfl-week", daemon=True).start()
+
+# Control page first, so it's up within seconds of a restart even if a data source is slow
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
                      SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode)
@@ -1743,6 +1765,11 @@ try:
 except Exception as e:
     # The sign keeps working without the control page
     log_error("Control page", e)
+
+# Data loads in the background; the display starts right away and fills in as it arrives
+for loader, name in ((schedule_weather_update, "weather"), (schedule_bus_update, "buses"),
+                     (schedule_nfl_update, "nfl-today"), (spotify_loop, "spotify"), (nfl_week_loop, "nfl-week")):
+    threading.Thread(target=loader, name=name, daemon=True).start()
 td_alert = None
 td_alert_start = 0.0
 music_track = None
@@ -1755,9 +1782,14 @@ music_start = 0.0
 cycle_start = time.monotonic()
 bus_screen = get_bus_screen()
 has_buses = bool(arrival_times)
+last_watchdog_ping = 0.0
+sd_notify("READY=1")
 
 try:
     while True:
+        if time.monotonic() - last_watchdog_ping >= WATCHDOG_PING_SECONDS:
+            sd_notify("WATCHDOG=1")
+            last_watchdog_ping = time.monotonic()
         art = spotify_album_art
         mode = current_mode()
         if settings["display_mode"] == "auto" and mode != auto_showing:
@@ -1830,8 +1862,8 @@ try:
             continue
 
         elapsed = time.monotonic() - cycle_start
-        if elapsed >= bus_screen["cycle_seconds"]:
-            # Restart the cycle on a fresh snapshot
+        if elapsed >= bus_screen["cycle_seconds"] or (not has_buses and arrival_times):
+            # Restart the cycle on a fresh snapshot (right away when buses first show up)
             cycle_start = time.monotonic()
             bus_screen = get_bus_screen()
             has_buses = bool(arrival_times)

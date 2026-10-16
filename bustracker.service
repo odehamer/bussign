@@ -4,7 +4,13 @@ Wants=network-online.target
 After=network-online.target time-sync.target
 
 [Service]
-Type=simple
+# main.py tells systemd when it's ready and checks in every few seconds from the display loop;
+# if it goes quiet for WatchdogSec (frozen screen), systemd restarts it
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
+TimeoutStartSec=60
+TimeoutStopSec=15
 WorkingDirectory=/home/pi/bustracker
 # rpi-rgb-led-matrix needs root for GPIO access.
 User=root
