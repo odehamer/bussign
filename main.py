@@ -247,6 +247,8 @@ def update_settings(changes):
         reset_fantasy()
     if "display_mode" in changes or "fantasy_enabled" in changes or "sleeper_username" in changes:
         nfl_week_wakeup.set()
+    if "display_mode" in changes:
+        spotify_wakeup.set()
     return dict(new_settings), None
 
 
@@ -290,6 +292,7 @@ fantasy_summary = ""
 fantasy_user_id = None
 fantasy_leagues = {"fetched_at": float("-inf"), "season": None, "leagues": []}
 fantasy_pictures = {}  # picture URL -> image (RGB, FANTASY_PICTURE_SIZE square)
+spotify_wakeup = threading.Event()  # set when the display mode changes, so music mode loads right away
 nfl_week_wakeup = threading.Event()  # set when the display mode changes, so sports mode loads right away
 # Per game: total points when first seen (older plays are never alerted), total covered by the
 # last summary fetch, and scoring play ids already handled
@@ -916,15 +919,18 @@ def get_fantasy_matchups():
 
 
 def nfl_week_loop():
-    # Only fetched while sports mode is on: every minute during live games, otherwise every 10
+    # Loaded once at startup so switching to sports mode is instant, then refreshed while sports mode
+    # is on: every minute during live games, otherwise every 10
     while True:
-        if settings["display_mode"] == "sports":
-            refresh_seconds = NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS
-            if time.monotonic() - nfl_week_fetched_at >= refresh_seconds:
-                get_nfl_week()
-            # Fantasy points move with the real games, so they refresh on the same schedule
-            if settings["fantasy_enabled"] and time.monotonic() - fantasy_fetched_at >= refresh_seconds:
-                get_fantasy_matchups()
+        sports = settings["display_mode"] == "sports"
+        refresh_seconds = NFL_LIVE_POLL_SECONDS if nfl_week_has_live else NFL_POLL_SECONDS
+        week_age = time.monotonic() - nfl_week_fetched_at
+        if week_age == float("inf") or (sports and week_age >= refresh_seconds):
+            get_nfl_week()
+        # Fantasy points move with the real games, so they refresh on the same schedule
+        fantasy_age = time.monotonic() - fantasy_fetched_at
+        if settings["fantasy_enabled"] and (fantasy_age == float("inf") or (sports and fantasy_age >= refresh_seconds)):
+            get_fantasy_matchups()
         nfl_week_wakeup.wait(SPORTS_CHECK_SECONDS)
         nfl_week_wakeup.clear()
 
@@ -1318,7 +1324,6 @@ def clear_spotify_now_playing():
 
 def spotify_active():
     # Spotify is only checked while the sign is in music mode
-    # Music mode always needs Spotify; otherwise it follows the album art switch
     return settings["display_mode"] == "music"
 
 
@@ -1333,7 +1338,7 @@ def fetch_spotify_now_playing():
     global spotify_artist_name
 
     if not spotify_active():
-        clear_spotify_now_playing()
+        # Keep the last song, so switching back to music mode shows it right away while it refreshes
         return
 
     token = get_spotify_access_token()
@@ -1385,11 +1390,12 @@ def fetch_spotify_now_playing():
         log_error("Spotify playback", e)
 
 
-def schedule_spotify_update():
-    fetch_spotify_now_playing()
-    timer = threading.Timer(SPOTIFY_POLL_SECONDS, schedule_spotify_update)
-    timer.daemon = True
-    timer.start()
+def spotify_loop():
+    # Checks Spotify every SPOTIFY_POLL_SECONDS, or right away when the display mode changes
+    while True:
+        fetch_spotify_now_playing()
+        spotify_wakeup.wait(SPOTIFY_POLL_SECONDS)
+        spotify_wakeup.clear()
 
 def draw_sun(canvas):
     canvas.SetPixel(25, 19, sun_color.red, sun_color.green, sun_color.blue)
@@ -1772,7 +1778,7 @@ offscreen_canvas = matrix.CreateFrameCanvas()  # Create ONCE and reuse
 
 # Start weather update scheduler
 schedule_weather_update()
-schedule_spotify_update()
+threading.Thread(target=spotify_loop, name="spotify", daemon=True).start()
 schedule_bus_update()
 
 STARTED_AT = time.monotonic()
