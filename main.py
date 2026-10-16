@@ -93,7 +93,8 @@ SPORTS_CHECK_SECONDS = 15    # how often the week's scores are checked for being
 # Sleeper fantasy matchups, shown after the NFL games in sports mode
 SLEEPER_USERNAME = "odehamer"
 SLEEPER_API = "https://api.sleeper.app/v1/"
-FANTASY_SECONDS = 6.0           # time on each matchup
+FANTASY_SECONDS = 5.0           # hold on each matchup in the sports ticker
+FANTASY_PICTURE_SIZE = 14       # team pictures are scaled to this many pixels square
 FANTASY_LEAGUE_CACHE = 6 * 3600 # re-read league names, rosters and team names this often
 NFL_UPCOMING_GAP = 12        # space either side of the "@" so upcoming games are as wide as played ones
 NFL_TICKER_FRAME = 0.03      # seconds per frame while the ticker runs
@@ -289,6 +290,7 @@ fantasy_fetched_at = float("-inf")
 fantasy_summary = ""
 fantasy_user_id = None
 fantasy_leagues = {"fetched_at": float("-inf"), "season": None, "leagues": []}
+fantasy_pictures = {}  # picture URL -> image (RGB, FANTASY_PICTURE_SIZE square)
 nfl_week_wakeup = threading.Event()  # set when the display mode changes, so sports mode loads right away
 # Per game: total points when first seen (older plays are never alerted), total covered by the
 # last summary fetch, and scoring play ids already handled
@@ -331,6 +333,7 @@ nfl_label_color = graphics.Color(213, 10, 10)
 nfl_score_color = graphics.Color(255, 255, 255)
 nfl_loser_score_color = graphics.Color(120, 120, 120)
 nfl_status_color = graphics.Color(43, 224, 227)
+gold_color = graphics.Color(255, 190, 0)
 nfl_separator_color = (70, 70, 70)
 date_color = graphics.Color(43, 224, 227)
 
@@ -815,14 +818,43 @@ def load_fantasy_leagues(season):
                      or fantasy_user_id in (r.get("co_owners") or [])), None)
         if mine is None:
             continue
-        names = {}
+        names, pictures = {}, {}
         for roster in rosters:
             owner = users.get(roster.get("owner_id")) or {}
-            names[roster.get("roster_id")] = ((owner.get("metadata") or {}).get("team_name")
-                                              or owner.get("display_name") or f"Team {roster.get('roster_id')}")
+            metadata = owner.get("metadata") or {}
+            names[roster.get("roster_id")] = (metadata.get("team_name") or owner.get("display_name")
+                                              or f"Team {roster.get('roster_id')}")
+            # The team's own picture for this league, else the owner's Sleeper avatar
+            pictures[roster.get("roster_id")] = metadata.get("avatar") or (
+                f"https://sleepercdn.com/avatars/thumbs/{owner['avatar']}" if owner.get("avatar") else "")
         leagues.append({"id": league_id, "name": league.get("name") or "League",
-                        "roster_id": mine.get("roster_id"), "names": names})
+                        "roster_id": mine.get("roster_id"), "names": names, "pictures": pictures})
     return leagues
+
+
+def load_fantasy_picture(url):
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    picture = Image.open(io.BytesIO(response.content)).convert("RGBA")
+    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+    picture = ImageOps.fit(picture, (FANTASY_PICTURE_SIZE, FANTASY_PICTURE_SIZE), method=resample)
+    # Flatten any transparency onto black
+    tile = Image.new("RGB", picture.size, (0, 0, 0))
+    tile.paste(picture, (0, 0), picture)
+    return tile
+
+
+def load_missing_fantasy_pictures(matchups):
+    # Pictures rarely change, so each one is downloaded once per run
+    for matchup in matchups:
+        for url in (matchup["my_picture"], matchup["opponent_picture"]):
+            if not url or url in fantasy_pictures:
+                continue
+            try:
+                fantasy_pictures[url] = load_fantasy_picture(url)
+                log_ok("Fantasy picture")
+            except Exception as e:
+                log_error("Fantasy picture", e)
 
 
 def get_fantasy_matchups():
@@ -851,7 +883,10 @@ def get_fantasy_matchups():
                 "my_points": float(me.get("points") or 0),
                 "opponent_name": league["names"].get(opponent.get("roster_id"), "?") if opponent else "BYE",
                 "opponent_points": float(opponent.get("points") or 0) if opponent else None,
+                "my_picture": league["pictures"].get(me.get("roster_id"), ""),
+                "opponent_picture": league["pictures"].get(opponent.get("roster_id"), "") if opponent else "",
             })
+        load_missing_fantasy_pictures(matchups)
         fantasy_matchups = matchups
         fantasy_fetched_at = time.monotonic()
         log_ok("Fantasy")
@@ -916,7 +951,7 @@ def get_nfl_game_pause(game, game_count):
     return NFL_FAVORITE_PAUSE if is_favorite(game) else NFL_TICKER_PAUSE
 
 
-def build_nfl_ticker(games, hold_seconds=None):
+def build_nfl_ticker(games, hold_seconds=None, matchups=()):
     # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
     segments = []
     x = 0
@@ -949,8 +984,9 @@ def build_nfl_ticker(games, hold_seconds=None):
         segments.append({"x": x, "width": 1, "kind": "line"})
         x += 1 + NFL_SEPARATOR_PADDING
 
-    add_text("NFL", nfl_label_color, wait_time_font)
     stops = []
+    if games:
+        add_text("NFL", nfl_label_color, wait_time_font)
     # Favorite team's game first; the rest keep ESPN's order
     for game in sorted(games, key=lambda g: not is_favorite(g)):
         add_separator()
@@ -988,7 +1024,44 @@ def build_nfl_ticker(games, hold_seconds=None):
         else:
             hold = hold_seconds * (1.5 if is_favorite(game) else 1)
         stops.append((options.cols + game_start - (options.cols - (x - game_start)) // 2, hold))
-    return {"segments": segments, "width": x, "stops": stops}
+    if matchups:
+        # Fantasy matchups: league name on top, each team's picture with its score underneath
+        if games:
+            add_separator()
+        add_text("FANTASY", gold_color, wait_time_font)
+        column = 31
+        for matchup in matchups:
+            add_separator()
+            card_start = x
+            league = to_display_text(matchup["league"]).strip(" -").upper() or "FANTASY"
+            segments.append({"x": card_start, "width": 2 * column, "kind": "marquee", "text": league,
+                             "color": gold_color, "font": nfl_status_font, "y": NFL_STATUS_BASELINE,
+                             "stop": len(stops)})
+            mine, theirs = matchup["my_points"], matchup["opponent_points"]
+            sides = [(matchup["my_picture"], mine, theirs is None or mine >= theirs),
+                     (matchup["opponent_picture"], theirs, theirs is not None and theirs >= mine)]
+            for i, (url, points, leading) in enumerate(sides):
+                column_start = card_start + i * column
+                picture = fantasy_pictures.get(url)
+                if picture is not None:
+                    segments.append({"x": column_start + (column - FANTASY_PICTURE_SIZE) // 2,
+                                     "width": FANTASY_PICTURE_SIZE, "kind": "image", "image": picture, "y": 9})
+                score = "BYE" if points is None else f"{points:.1f}"
+                score_width = text_width(score, arrival_time_font)
+                segments.append({"x": column_start + (column - score_width) // 2, "width": score_width,
+                                 "kind": "text", "text": score, "font": arrival_time_font, "y": 31,
+                                 "color": nfl_score_color if leading else nfl_loser_score_color})
+            x = card_start + 2 * column
+            stops.append((options.cols + card_start - (options.cols - 2 * column) // 2,
+                          hold_seconds or FANTASY_SECONDS))
+    # When each stop is reached, so a long league name starts scrolling once its card is centered
+    arrivals, elapsed, scrolled = [], 0.0, 0
+    for stop, hold in stops:
+        elapsed += (stop - scrolled) / NFL_TICKER_SPEED
+        arrivals.append(elapsed)
+        elapsed += hold
+        scrolled = stop
+    return {"segments": segments, "width": x, "stops": stops, "arrivals": arrivals}
 
 
 def get_nfl_ticker_scroll(ticker, elapsed):
@@ -1006,6 +1079,27 @@ def get_nfl_ticker_scroll(ticker, elapsed):
     return scrolled + elapsed * NFL_TICKER_SPEED
 
 
+def draw_clipped_marquee(canvas, segment, left, elapsed):
+    # Text centered in its area if it fits; otherwise it scrolls in a loop, drawing only the
+    # characters that are fully inside the area so it never spills onto neighbors
+    font, text = segment["font"], segment["text"]
+    widths = [max(0, font.CharacterWidth(ord(c))) for c in text]
+    width = sum(widths)
+    if width <= segment["width"]:
+        graphics.DrawText(canvas, font, left + (segment["width"] - width) // 2, segment["y"], segment["color"], text)
+        return
+    loop = width + MUSIC_SCROLL_GAP
+    period = MUSIC_SCROLL_PAUSE + loop / MUSIC_SCROLL_SPEED
+    shift = int(max(0.0, elapsed % period - MUSIC_SCROLL_PAUSE) * MUSIC_SCROLL_SPEED)
+    right = left + segment["width"]
+    for start in (left - shift, left - shift + loop):
+        char_x = start
+        for char, char_width in zip(text, widths):
+            if char_x >= left and char_x + char_width <= right:
+                graphics.DrawText(canvas, font, char_x, segment["y"], segment["color"], char)
+            char_x += char_width
+
+
 def draw_nfl_ticker(canvas, ticker, elapsed):
     # Returns False once everything has scrolled fully off the left edge
     offset = options.cols - int(get_nfl_ticker_scroll(ticker, elapsed))
@@ -1019,7 +1113,9 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
         if segment["kind"] == "text":
             graphics.DrawText(canvas, segment["font"], left, segment["y"], segment["color"], segment["text"])
         elif segment["kind"] == "image":
-            canvas.SetImage(segment["image"], left, NFL_LOGO_TOP)
+            canvas.SetImage(segment["image"], left, segment.get("y", NFL_LOGO_TOP))
+        elif segment["kind"] == "marquee":
+            draw_clipped_marquee(canvas, segment, left, max(0.0, elapsed - ticker["arrivals"][segment["stop"]]))
         elif segment["kind"] == "line" and left >= 0:
             for y in range(3, options.rows - 3):
                 canvas.SetPixel(left, y, *nfl_separator_color)
@@ -1596,46 +1692,6 @@ def draw_marquee(canvas, font, text, y, color, elapsed):
     graphics.DrawText(canvas, font, 1 - shift + loop, y, color, text)
 
 
-def draw_scrolling_text(canvas, font, text, x, y, area_width, color, elapsed):
-    # Like draw_marquee, but anywhere on screen: fits -> drawn once, too wide -> hold, then loop.
-    # Spill past the area isn't cleared here; callers draw over it.
-    width = sum(font.CharacterWidth(ord(c)) for c in text)
-    if width <= area_width:
-        graphics.DrawText(canvas, font, x, y, color, text)
-        return
-    loop = width + MUSIC_SCROLL_GAP
-    period = MUSIC_SCROLL_PAUSE + loop / MUSIC_SCROLL_SPEED
-    shift = int(max(0.0, elapsed % period - MUSIC_SCROLL_PAUSE) * MUSIC_SCROLL_SPEED)
-    graphics.DrawText(canvas, font, x - shift, y, color, text)
-    graphics.DrawText(canvas, font, x - shift + loop, y, color, text)
-
-
-def draw_fantasy_matchup(canvas, matchup, elapsed):
-    # League name across the top, then our team and the opponent with scores on the right.
-    # Our score is green when winning, red when losing.
-    gold = graphics.Color(*MESSAGE_COLORS["gold"])
-    league = to_display_text(matchup["league"]).strip(" -").upper() or "FANTASY"
-    draw_scrolling_text(canvas, nfl_status_font, league, 1, 7, 62, gold, elapsed)
-
-    mine, theirs = matchup["my_points"], matchup["opponent_points"]
-    if theirs is None or mine == theirs:
-        my_color = nfl_score_color
-    else:
-        my_color = graphics.Color(*MESSAGE_COLORS["green"]) if mine > theirs else graphics.Color(*MESSAGE_COLORS["red"])
-    rows = [
-        (to_display_text(matchup["my_name"]) or SLEEPER_USERNAME, nfl_score_color, f"{mine:.1f}", my_color, 18),
-        (to_display_text(matchup["opponent_name"]) or "?", nfl_loser_score_color,
-         "" if theirs is None else f"{theirs:.1f}", nfl_loser_score_color, 29),
-    ]
-    for name, name_color, score, score_color, baseline in rows:
-        score_width = sum(arrival_time_font.CharacterWidth(ord(c)) for c in score)
-        name_area = options.cols - score_width - 6  # names end here, leaving a 3px gap before the score
-        draw_scrolling_text(canvas, nfl_status_font, name, 1, baseline, name_area, name_color, elapsed)
-        # Clear anything the scrolling name drew past its area, then draw the score
-        canvas.FillRect(name_area + 1, baseline - 8, options.cols, baseline + 2)
-        graphics.DrawText(canvas, arrival_time_font, options.cols - score_width - 1, baseline + 1, score_color, score)
-
-
 def draw_music_screen(canvas, art, elapsed):
     # elapsed: seconds since this song started showing (restarts the scrolling for each song)
     title_color = nfl_score_color if spotify_is_playing else nfl_loser_score_color
@@ -1706,8 +1762,6 @@ message_screen = None
 message_start = 0.0
 music_track = None
 sports_ticker = None
-sports_phase = None  # "nfl" while the week's games scroll, "fantasy" while matchups show
-sports_matchups = []
 sports_start = 0.0
 sports_last_frame = 0.0
 music_start = 0.0
@@ -1776,44 +1830,28 @@ try:
             message_screen = None
             cycle_start = 0.0  # force a fresh cycle below
 
-        # Sports mode: loop through this week's games, then our fantasy matchups. Touchdowns and
+        # Sports mode: one ticker with this week's games, then our fantasy matchups. Touchdowns and
         # messages above still interrupt; the loop picks up where it left off. With nothing loaded
         # yet it falls through to the normal screens.
         week_games = nfl_week_games
         matchups = fantasy_matchups if settings["fantasy_enabled"] else []
         if settings["display_mode"] == "sports" and (week_games or matchups):
             now = time.monotonic()
-            if sports_phase is not None and now - sports_last_frame > 0.5:
+            if sports_ticker is None:
+                sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS, matchups=matchups)
+                sports_start = now
+            elif now - sports_last_frame > 0.5:
                 sports_start += now - sports_last_frame  # resume after an interruption
             sports_last_frame = now
-            if sports_phase is None:
-                if week_games:
-                    sports_phase = "nfl"
-                    sports_ticker = build_nfl_ticker(week_games, hold_seconds=SPORTS_GAME_SECONDS)
-                else:
-                    sports_phase, sports_matchups = "fantasy", list(matchups)
-                sports_start = now
             offscreen_canvas.brightness = brightness
             offscreen_canvas.Clear()
-            if sports_phase == "nfl" and not draw_nfl_ticker(offscreen_canvas, sports_ticker, now - sports_start):
-                # Games done: on to the matchups, or start the next loop with the latest scores
-                sports_ticker = None
-                sports_phase = None
-                if matchups:
-                    sports_phase, sports_matchups, sports_start = "fantasy", list(matchups), now
-            if sports_phase == "fantasy":
-                index = int((now - sports_start) // FANTASY_SECONDS)
-                if index < len(sports_matchups):
-                    draw_fantasy_matchup(offscreen_canvas, sports_matchups[index],
-                                         now - sports_start - index * FANTASY_SECONDS)
-                else:
-                    sports_phase = None  # start over with the NFL games
+            if not draw_nfl_ticker(offscreen_canvas, sports_ticker, now - sports_start):
+                sports_ticker = None  # finished a loop: rebuild next frame with the latest scores
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
             time.sleep(NFL_TICKER_FRAME)
             cycle_start = 0.0  # start a fresh cycle if sports mode ends
             continue
         sports_ticker = None
-        sports_phase = None
 
         # Music mode: song title and artist on the left, album art on the right. With nothing
         # loaded in Spotify it falls through to the normal clock and bus screens.

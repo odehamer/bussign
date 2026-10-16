@@ -127,16 +127,6 @@ class Canvas:
             self.buffer[i + 1] = g
             self.buffer[i + 2] = b
 
-    def FillRect(self, x0, y0, x1, y1, r=0, g=0, b=0):
-        # Fill the rectangle from (x0, y0) up to but not including (x1, y1), clipped to the canvas
-        x0, x1 = max(0, x0), min(self.width, x1)
-        if x0 >= x1:
-            return
-        row = bytes((r, g, b)) * (x1 - x0)
-        for y in range(max(0, y0), min(self.height, y1)):
-            start = (y * self.width + x0) * 3
-            self.buffer[start:start + len(row)] = row
-
     def SetImage(self, image, x=0, y=0):
         if image.mode != "RGB":
             image = image.convert("RGB")
