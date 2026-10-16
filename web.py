@@ -24,7 +24,7 @@ def clean_text(text):
 
 
 def start_server(port, pin, colors, add_message, list_messages, delete_message, page_path,
-                 settings_fields, get_settings, update_settings):
+                 settings_fields, get_settings, update_settings, get_screen_png):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -66,6 +66,16 @@ def start_server(port, pin, colors, add_message, list_messages, delete_message, 
             elif self.path == "/api/settings":
                 if self.authorized():
                     self.send_json(200, {"values": get_settings(), "fields": settings_fields})
+            elif self.path == "/api/screen.png":
+                # What's on the sign right now, as a 64x32 PNG
+                if self.authorized():
+                    body = get_screen_png()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(body)
             else:
                 self.send_json(404, {"error": "Not found"})
 

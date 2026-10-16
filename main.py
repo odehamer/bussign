@@ -21,7 +21,10 @@ import web
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
-from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
+from rgbmatrix import RGBMatrix, RGBMatrixOptions
+# Frames are drawn in memory (so the control page can show them), then pushed to the LEDs
+import frame
+graphics = frame
 
 # Fix SSL certificate issue
 os.environ['REQUESTS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
@@ -1493,7 +1496,7 @@ def draw_weather(canvas, is_day, is_animated):
 signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
 
 # Initialize matrix
-matrix = RGBMatrix(options=options)
+matrix = frame.Display(RGBMatrix(options=options))
 offscreen_canvas = matrix.CreateFrameCanvas()  # Create ONCE and reuse
 
 # Start weather update scheduler
@@ -1506,7 +1509,7 @@ schedule_nfl_update()
 try:
     web.start_server(WEB_PORT, WEB_PIN, MESSAGE_COLORS, add_message, list_messages, delete_message,
                      os.path.join(APP_DIR, "web", "index.html"),
-                     SETTINGS_FIELDS, get_settings, update_settings)
+                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page

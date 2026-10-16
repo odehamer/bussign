@@ -99,6 +99,17 @@
   .pin-row button { width: auto; padding: 12px 18px; }
   [hidden] { display: none !important; }
 
+  .live { padding: 12px; }
+  .live-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .live-header h2 { margin: 0; }
+  .live-state { font-size: 12px; color: var(--muted); }
+  .live-state.ok::before {
+    content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: #3ddc84; margin-right: 6px; vertical-align: 1px;
+  }
+  #live { display: block; width: 100%; aspect-ratio: 2 / 1; border-radius: 8px; background: #000; }
+  #live.stale { opacity: 0.4; }
+
   .tabs {
     display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
@@ -148,6 +159,14 @@
   </section>
 
   <div id="app">
+    <section class="live">
+      <div class="live-header">
+        <h2>On the sign now</h2>
+        <span class="live-state" id="live-state" role="status">Connecting…</span>
+      </div>
+      <canvas id="live" width="640" height="320" role="img" aria-label="Live view of the sign"></canvas>
+    </section>
+
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tab-btn-messages" aria-selected="true" aria-controls="tab-messages">Message</button>
       <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
@@ -450,8 +469,66 @@
     }
   }
 
+  // ---- Live view: the sign's current frame, drawn as LED dots ----
+  const LIVE_INTERVAL_MS = 250;
+  const liveCanvas = $("live");
+  const liveContext = liveCanvas.getContext("2d");
+  const pixelCanvas = document.createElement("canvas");
+  pixelCanvas.width = 64;
+  pixelCanvas.height = 32;
+  const pixelContext = pixelCanvas.getContext("2d", { willReadFrequently: true });
+  let liveTimer = null;
+  let liveBusy = false;
+
+  function drawLeds(imageData) {
+    const cell = liveCanvas.width / 64;
+    const radius = cell * 0.42;
+    liveContext.fillStyle = "#000";
+    liveContext.fillRect(0, 0, liveCanvas.width, liveCanvas.height);
+    const px = imageData.data;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 64; x++) {
+        const i = (y * 64 + x) * 4;
+        const lit = px[i] || px[i + 1] || px[i + 2];
+        liveContext.fillStyle = lit ? `rgb(${px[i]},${px[i + 1]},${px[i + 2]})` : "#14171b";
+        liveContext.beginPath();
+        liveContext.arc((x + 0.5) * cell, (y + 0.5) * cell, radius, 0, Math.PI * 2);
+        liveContext.fill();
+      }
+    }
+  }
+
+  async function updateLive() {
+    if (liveBusy || document.hidden || $("app").hidden) return;
+    liveBusy = true;
+    try {
+      const response = await fetch("/api/screen.png", { headers: { "X-Pin": pin }, cache: "no-store" });
+      if (!response.ok) throw new Error(response.status);
+      const bitmap = await createImageBitmap(await response.blob());
+      pixelContext.clearRect(0, 0, 64, 32);
+      pixelContext.drawImage(bitmap, 0, 0);
+      drawLeds(pixelContext.getImageData(0, 0, 64, 32));
+      liveCanvas.classList.remove("stale");
+      $("live-state").textContent = "Live";
+      $("live-state").className = "live-state ok";
+    } catch (e) {
+      liveCanvas.classList.add("stale");
+      $("live-state").textContent = "Can't reach the sign";
+      $("live-state").className = "live-state";
+    } finally {
+      liveBusy = false;
+    }
+  }
+
+  function startLive() {
+    if (!liveTimer) liveTimer = setInterval(updateLive, LIVE_INTERVAL_MS);
+    updateLive();
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) updateLive(); });
+
   updatePreview();
   refresh();
+  startLive();
   setInterval(() => { if (!document.hidden) refresh(); }, 10000);
 </script>
 </body>
