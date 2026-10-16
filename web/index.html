@@ -85,6 +85,14 @@
   .mode-name { display: block; font-weight: 600; }
   .mode-desc { display: block; font-size: 13px; color: var(--muted); }
   .mode-now { display: block; margin-top: 2px; color: var(--accent); }
+  .scenes { display: flex; flex-wrap: wrap; gap: 8px; margin: -2px 0 2px 34px; padding: 0; border: 0; }
+  .scene {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--panel-edge); background: #0f1115;
+    font-size: 14px; cursor: pointer;
+  }
+  .scene input { position: absolute; opacity: 0; pointer-events: none; }
+  .scene:has(input:checked) { border-color: var(--accent); background: #0f1d1f; color: var(--accent); }
+  .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .tabs {
     display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
@@ -210,9 +218,14 @@
             <span><span class="mode-name">Sports</span><span class="mode-desc">This week's football games, on a loop</span></span>
           </label>
           <label class="mode">
-            <input type="radio" name="mode" value="aquarium">
-            <span><span class="mode-name">Aquarium</span><span class="mode-desc">Fish, seaweed and bubbles in a little tank</span></span>
+            <input type="radio" name="mode" value="ambient">
+            <span><span class="mode-name">Ambient</span><span class="mode-desc">A calm moving scene. Pick one below</span></span>
           </label>
+          <fieldset class="scenes" id="scenes" aria-label="Ambient scene" hidden>
+            <label class="scene"><input type="radio" name="scene" value="aquarium">Aquarium</label>
+            <label class="scene"><input type="radio" name="scene" value="fireplace">Fireplace</label>
+            <label class="scene"><input type="radio" name="scene" value="rain">Rain on the window</label>
+          </fieldset>
           <label class="mode">
             <input type="radio" name="mode" value="drawing">
             <span><span class="mode-name">Drawing</span><span class="mode-desc">Your pixel art from the Draw tab</span></span>
@@ -311,12 +324,16 @@
 
   // ---- Mode (radio cards on the Sign tab) ----
   const modeInputs = () => document.querySelectorAll('#modes input[name="mode"]');
+  const sceneInputs = () => document.querySelectorAll('#scenes input[name="scene"]');
   let modeSaving = false;
 
-  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", aquarium: "Aquarium", drawing: "Drawing" };
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
+    // The scene choices only show while ambient mode is picked
+    $("scenes").hidden = mode !== "ambient";
+    sceneInputs().forEach((input) => { input.checked = input.value === settingValues.ambient_scene; });
     // In auto, say which mode is on screen right now
     $("auto-now").textContent = mode === "auto" && MODE_NAMES[activeMode] ? `Showing ${MODE_NAMES[activeMode]} now` : "";
   }
@@ -334,28 +351,35 @@
     }
   }
 
+  async function switchMode(changes) {
+    const previous = settingValues.display_mode;
+    const allInputs = [...modeInputs(), ...sceneInputs()];
+    modeSaving = true;
+    allInputs.forEach((i) => { i.disabled = true; });
+    $("mode-status").textContent = "Switching…";
+    $("mode-status").classList.remove("error");
+    try {
+      const data = await api("POST", "/api/settings", changes);
+      settingValues = data.values;
+      showMode(settingValues.display_mode);
+      $("mode-status").textContent = "";
+      updateLive();
+      setTimeout(loadMode, 1500);  // pick up what auto chose
+    } catch (e) {
+      showMode(previous);
+      $("mode-status").textContent = e.message;
+      $("mode-status").classList.add("error");
+    } finally {
+      modeSaving = false;
+      allInputs.forEach((i) => { i.disabled = false; });
+    }
+  }
+
   modeInputs().forEach((input) => {
-    input.addEventListener("change", async () => {
-      const previous = settingValues.display_mode;
-      modeSaving = true;
-      modeInputs().forEach((i) => { i.disabled = true; });
-      $("mode-status").textContent = "Switching…";
-      $("mode-status").classList.remove("error");
-      try {
-        const data = await api("POST", "/api/settings", { display_mode: input.value });
-        settingValues = data.values;
-        $("mode-status").textContent = "";
-        updateLive();
-        setTimeout(loadMode, 1500);  // pick up what auto chose
-      } catch (e) {
-        showMode(previous);
-        $("mode-status").textContent = e.message;
-        $("mode-status").classList.add("error");
-      } finally {
-        modeSaving = false;
-        modeInputs().forEach((i) => { i.disabled = false; });
-      }
-    });
+    input.addEventListener("change", () => switchMode({ display_mode: input.value }));
+  });
+  sceneInputs().forEach((input) => {
+    input.addEventListener("change", () => switchMode({ display_mode: "ambient", ambient_scene: input.value }));
   });
 
   // ---- Settings (rendered from the fields the sign sends) ----
@@ -400,7 +424,8 @@
     container.innerHTML = "";
     const sections = {};
     // Display mode has its own controls on the Sign tab
-    fields.filter((field) => field.key !== "display_mode").forEach((field) => {
+    // The mode and ambient scene are picked on the Sign tab
+    fields.filter((field) => !["display_mode", "ambient_scene"].includes(field.key)).forEach((field) => {
       if (!sections[field.section]) {
         const section = document.createElement("section");
         const heading = document.createElement("h2");

@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from PIL import Image, ImageOps
 import web
-import aquarium
+import ambient
 import drawing
 
 # NECESSARY!!!!! VVVVV
@@ -139,7 +139,9 @@ NFL_TEAMS = [
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
      "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
-                 ["aquarium", "Aquarium"], ["drawing", "Drawing"], ["auto", "Auto"]]},
+                 ["ambient", "Ambient"], ["drawing", "Drawing"], ["auto", "Auto"]]},
+    {"key": "ambient_scene", "section": "Mode", "label": "Ambient scene", "type": "choice",
+     "options": [["aquarium", "Aquarium"], ["fireplace", "Fireplace"], ["rain", "Rain on the window"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
     {"key": "night_brightness", "section": "Screen", "label": "Night brightness", "type": "range", "min": 1, "max": 100},
     {"key": "screen_off_enabled", "section": "Screen", "label": "Turn the screen off overnight", "type": "toggle"},
@@ -157,6 +159,7 @@ SETTINGS_FIELDS = [
 ]
 DEFAULT_SETTINGS = {
     "display_mode": "normal",
+    "ambient_scene": "aquarium",
     "day_brightness": DAY_BRIGHTNESS,
     "night_brightness": NIGHT_BRIGHTNESS,
     "screen_off_enabled": SCREEN_OFF_START_HOUR != SCREEN_OFF_END_HOUR,
@@ -205,6 +208,10 @@ def load_settings():
             for key, value in saved.items():
                 if key in RETIRED_SETTINGS:
                     continue
+                if key == "display_mode" and value == "aquarium":
+                    # Aquarium mode became one of the ambient scenes
+                    value = "ambient"
+                    loaded.setdefault("ambient_scene", "aquarium")
                 if validate_setting(key, value) is None:
                     loaded[key] = value
                 else:
@@ -1785,7 +1792,7 @@ td_alert = None
 td_alert_start = 0.0
 music_track = None
 auto_showing = None
-tank = aquarium.Aquarium()
+ambient_scenes = {}  # scene name -> scene, made the first time it's shown
 sports_ticker = None
 sports_ticker_user = None
 sports_start = 0.0
@@ -1842,13 +1849,16 @@ try:
             cycle_start = 0.0  # start a fresh cycle if drawing mode ends
             continue
 
-        # Aquarium mode: fish, seaweed and bubbles
-        if mode == "aquarium":
+        # Ambient mode: the aquarium, fireplace or rainy window, whichever scene is chosen
+        if mode == "ambient":
+            scene_name = settings["ambient_scene"]
+            if scene_name not in ambient_scenes:
+                ambient_scenes[scene_name] = ambient.SCENES[scene_name]()
             offscreen_canvas.brightness = brightness
-            tank.draw(offscreen_canvas, time.monotonic())
+            ambient_scenes[scene_name].draw(offscreen_canvas, time.monotonic())
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
             time.sleep(NFL_TICKER_FRAME)
-            cycle_start = 0.0  # start a fresh cycle if aquarium mode ends
+            cycle_start = 0.0  # start a fresh cycle if ambient mode ends
             continue
 
         # Sports mode: one ticker with this week's games, then our fantasy matchups. Touchdown alerts
