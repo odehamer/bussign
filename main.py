@@ -617,7 +617,7 @@ def parse_nfl_games(data, include_upcoming=False):
             # Upcoming: kickoff day and local time, e.g. "SUN 10:00"
             kickoff = datetime.fromisoformat(event["date"].replace("Z", "+00:00")).astimezone()
             status_text = f"{kickoff:%a} {kickoff.hour % 12 or 12}:{kickoff:%M}".upper()
-        game = {"id": event.get("id"), "state": state, "status": status_text}
+        game = {"id": event.get("id"), "state": state, "status": status_text, "date": event.get("date") or ""}
         # Live games: which team has the ball (ESPN gives its team id) and whether it's in the red zone
         situation = competition.get("situation") or {}
         game["possession"] = next((side for side in ("away", "home")
@@ -635,6 +635,9 @@ def parse_nfl_games(data, include_upcoming=False):
                 "logo_url": team.get("logoDark") or team.get("logo") or "",
             }
         games.append(game)
+    # ESPN lists games by status (live, then final, then upcoming); show them in kickoff order
+    # instead, so Thursday comes before Sunday and Monday. Games without a date go last.
+    games.sort(key=lambda g: (not g["date"], g["date"]))
     return games
 
 
@@ -1023,7 +1026,7 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
     stops = []
     if games:
         add_text("NFL", nfl_label_color, wait_time_font)
-    # Favorite team's game first; the rest keep ESPN's order
+    # Favorite team's game first; the rest in kickoff order
     for game in sorted(games, key=lambda g: not is_favorite(g)):
         add_gap()
         game_start = x
