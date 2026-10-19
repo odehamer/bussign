@@ -115,7 +115,7 @@ TD_ALERTS_FAVORITE_ONLY = False  # True = only alert for the favorite team's tou
 # Phone control page: http://<pi>.local:WEB_PORT on the home network. Set WEB_PIN in .env to require a PIN.
 WEB_PORT = 8080
 WEB_PIN = os.getenv("WEB_PIN", "")
-NFL_SEPARATOR_PADDING = 3    # blank pixels either side of the line between games
+NFL_GAME_GAP = 7             # blank pixels between games
 NFL_LOGO_GAP = 1             # pixels between a logo and its score
 NFL_TEAM_GAP = 4             # pixels between the away score and the home logo
 
@@ -358,7 +358,6 @@ nfl_score_color = graphics.Color(255, 255, 255)
 nfl_loser_score_color = graphics.Color(120, 120, 120)
 nfl_status_color = graphics.Color(43, 224, 227)
 gold_color = graphics.Color(255, 190, 0)
-nfl_separator_color = (70, 70, 70)
 date_color = graphics.Color(43, 224, 227)
 
 sun_color = graphics.Color(255, 225, 0)
@@ -988,7 +987,7 @@ NFL_SCORE_BASELINE = 23
 
 
 def build_nfl_ticker(games, hold_seconds, matchups=()):
-    # Lay the ticker out once as segments (text, logo or separator line) at fixed x offsets
+    # Lay the ticker out once as segments (text or logo) at fixed x offsets
     segments = []
     x = 0
 
@@ -1017,18 +1016,16 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
         segments.append({"x": x, "width": NFL_LOGO_SIZE, "kind": "possession", "game_id": game["id"], "side": side})
         x += NFL_LOGO_SIZE + NFL_LOGO_GAP
 
-    def add_separator():
+    def add_gap():
         nonlocal x
-        x += NFL_SEPARATOR_PADDING
-        segments.append({"x": x, "width": 1, "kind": "line"})
-        x += 1 + NFL_SEPARATOR_PADDING
+        x += NFL_GAME_GAP
 
     stops = []
     if games:
         add_text("NFL", nfl_label_color, wait_time_font)
     # Favorite team's game first; the rest keep ESPN's order
     for game in sorted(games, key=lambda g: not is_favorite(g)):
-        add_separator()
+        add_gap()
         game_start = x
         if game["state"] == "pre":
             # Not started: away logo @ home logo, kickoff time above
@@ -1063,11 +1060,11 @@ def build_nfl_ticker(games, hold_seconds, matchups=()):
     if matchups:
         # Fantasy matchups: league name on top, each team's picture with its score underneath
         if games:
-            add_separator()
+            add_gap()
         add_text("FANTASY", gold_color, wait_time_font)
         column = 31
         for matchup in matchups:
-            add_separator()
+            add_gap()
             card_start = x
             league = to_display_text(matchup["league"]).strip(" -").upper() or "FANTASY"
             segments.append({"x": card_start, "width": 2 * column, "kind": "marquee", "text": league,
@@ -1166,9 +1163,6 @@ def draw_nfl_ticker(canvas, ticker, elapsed):
             canvas.SetImage(segment["image"], left, segment.get("y", NFL_LOGO_TOP))
         elif segment["kind"] == "marquee":
             draw_clipped_marquee(canvas, segment, left, max(0.0, elapsed - ticker["arrivals"][segment["stop"]]))
-        elif segment["kind"] == "line" and left >= 0:
-            for y in range(3, options.rows - 3):
-                canvas.SetPixel(left, y, *nfl_separator_color)
         elif segment["kind"] == "possession":
             draw_possession_marker(canvas, segment, left, live_games)
         elif segment["kind"] == "underline":
