@@ -635,9 +635,9 @@ def parse_nfl_games(data, include_upcoming=False):
                 "logo_url": team.get("logoDark") or team.get("logo") or "",
             }
         games.append(game)
-    # ESPN lists games by status (live, then final, then upcoming); show them in kickoff order
-    # instead, so Thursday comes before Sunday and Monday. Games without a date go last.
-    games.sort(key=lambda g: (not g["date"], g["date"]))
+    # Live games first, then the rest in kickoff order (ESPN's own order put a finished Thursday
+    # game after Sunday's). Games without a date go last.
+    games.sort(key=lambda g: (g["state"] != "in", not g["date"], g["date"]))
     return games
 
 
