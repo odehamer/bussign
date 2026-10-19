@@ -661,12 +661,24 @@ def to_int(value):
         return 0
 
 
-def clean_play_text(text):
-    # "Bucky Irving 5 Yd pass from Jalon Daniels (Chase McLaughlin Kick)" -> scorer and description
-    description = re.sub(r"\s*\(.*?\)", "", text or "").strip()
-    match = re.match(r"^(.*?)\s+\d+\s+Yd", description)
-    scorer = match.group(1) if match else ""
-    return scorer.upper(), description.upper()
+def describe_touchdown(play):
+    # "Michael Penix Jr. 10 Yd Rush (Younghoe Koo Kick)", type "Rushing Touchdown"
+    #   -> ("MICHAEL PENIX JR", "MICHAEL PENIX JR 10 YARD RUSH TD"); a caught pass is a REC TD
+    text = to_display_text(re.sub(r"\s*\(.*?\)", "", play.get("text") or ""))
+    kind = (play.get("type") or {}).get("text") or ""
+    if kind == "Passing Touchdown":
+        kind = "REC TD"
+    elif kind == "Rushing Touchdown":
+        kind = "RUSH TD"
+    else:
+        # "Interception Return Touchdown" -> "INTERCEPTION RETURN TD"
+        kind = re.sub(r"\s*touchdown$", "", kind.strip(), flags=re.IGNORECASE).upper()
+        kind = f"{kind} TD" if kind else "TD"
+    match = re.match(r"^(.*?)\s+(\d+)\s+Yd\b", text)
+    if not match:
+        return "", (text or kind).upper()
+    scorer = re.sub(r"\b(Jr|Sr)\.", r"\1", match.group(1)).upper()
+    return scorer, f"{scorer} {match.group(2)} YARD {kind}"
 
 
 def touchdown_try_done(play, points_added):
@@ -685,7 +697,7 @@ def queue_touchdown_alert(game, play):
     opponent = next((t for a, t in teams.items() if a != abbr), None)
     away_score, home_score = to_int(play.get("awayScore")), to_int(play.get("homeScore"))
     team_score, opponent_score = (away_score, home_score) if team is game["away"] else (home_score, away_score)
-    scorer, description = clean_play_text(play.get("text"))
+    scorer, description = describe_touchdown(play)
     nfl_td_alerts.append({
         "abbr": abbr,
         "color": team["color"] if team else (255, 255, 255),
@@ -1184,7 +1196,7 @@ def next_td_alert():
 
 
 def build_td_alert(alert):
-    # Scrolling line: scorer's name in team color, the rest of the play in white
+    # Scrolling line: scorer's name in team color, then the yards and kind of touchdown in white
     scorer = alert["scorer"]
     rest = alert["description"][len(scorer):] if scorer and alert["description"].startswith(scorer) else " " + alert["description"]
     color = graphics.Color(*alert["color"])
