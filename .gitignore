@@ -19,5 +19,7 @@ drawings/
 # Game players and their chips (blackjack.json is from before profiles)
 players.json
 players.json.tmp
+bets.json
+bets.json.tmp
 blackjack.json
 blackjack.json.tmp

@@ -25,6 +25,7 @@ import blackjack
 import hangman
 import slots
 import players as player_profiles
+import sportsbook
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
@@ -1799,6 +1800,8 @@ def show_blackjack():
 # Everyone's chips and stats; the chips from before profiles go to the first player made
 game_players = player_profiles.Players(os.path.join(APP_DIR, "players.json"), os.path.join(APP_DIR, "blackjack.json"))
 game_fonts = {"text": nfl_status_font, "tiny": bus_number_font}
+# NFL bets with the same chips; it keeps its own schedule and settles bets as games finish
+nfl_book = sportsbook.Sportsbook(os.path.join(APP_DIR, "bets.json"), game_players)
 card_table = blackjack.Blackjack(game_players, game_fonts, on_play=show_blackjack)
 
 
@@ -1823,7 +1826,7 @@ slot_machine = slots.SlotMachine(game_players, game_fonts, on_play=show_slots)
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
                      SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting, card_table, word_game, slot_machine,
-                     game_players)
+                     game_players, nfl_book)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page

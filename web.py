@@ -15,7 +15,7 @@ MAX_DRAWING_BODY_BYTES = 64 * 1024  # a whole 64x32 drawing, or a long batch of 
 
 
 def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
-                 get_active_mode, drawing, blackjack, hangman, slots, players):
+                 get_active_mode, drawing, blackjack, hangman, slots, players, sportsbook):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -84,6 +84,8 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 self.send_json(200, hangman.state())
             elif route == "/api/slots":
                 self.send_json(200, slots.state(time.monotonic(), viewer))
+            elif route == "/api/bets":
+                self.send_json(200, sportsbook.state(viewer))
             elif route == "/api/players":
                 self.send_json(200, {"players": players.public()})
             elif saved:
@@ -165,6 +167,14 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 player = data.get("player")
                 error = slots.act(data.get("action"), data.get("amount"), time.monotonic(), player)
                 return self.send_json(400, {"error": error}) if error else self.send_json(200, slots.state(time.monotonic(), player))
+            if self.path == "/api/bets":
+                # {"action": "place", "game": ID, "team": "ATL", "amount": 50} or {"action": "cancel", "bet": 3}
+                data = self.read_json()
+                if data is None:
+                    return
+                player = data.get("player")
+                error = sportsbook.act(data.get("action"), data, player)
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, sportsbook.state(player))
             if self.path == "/api/players":
                 # {"action": "create", "name": "Sam"} or {"action": "delete", "player": ID}
                 data = self.read_json()

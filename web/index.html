@@ -95,6 +95,29 @@
   .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .game-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
+  .game-picker label:last-child:nth-child(odd) { grid-column: span 2; }
+  .bet-week { margin: 16px 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .bet-game { padding: 12px 0; border-top: 1px solid var(--panel-edge); }
+  .bet-game:first-of-type { border-top: 0; }
+  .bet-top { display: flex; justify-content: space-between; gap: 10px; font-weight: 600; }
+  .bet-top .when { font-weight: 400; color: var(--muted); font-size: 14px; text-align: right; }
+  .bet-picks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .bet-picks button, .bet-mine button {
+    padding: 10px 6px; border-radius: 10px; border: 1px solid var(--panel-edge); background: #0f1115;
+    color: var(--text); font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .bet-picks .odds { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .bet-mine { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px;
+              padding: 8px 10px; border-radius: 10px; background: #1d1a0f; color: #ffbe00; font-size: 14px; }
+  .bet-mine button { padding: 6px 10px; font-size: 13px; }
+  .bet-result { margin-top: 6px; font-size: 14px; }
+  .bet-result.won { color: #3ddc84; }
+  .bet-result.lost { color: var(--danger); }
+  .bet-history { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+  .bet-history li { padding: 6px 0; border-top: 1px solid var(--panel-edge); display: flex; justify-content: space-between; gap: 10px; }
+  .bet-history li:first-child { border-top: 0; }
+  .bet-history .won { color: #3ddc84; }
+  .bet-history .lost { color: var(--danger); }
   .player-row { display: flex; align-items: center; gap: 12px; }
   .player-row label { color: var(--muted); font-size: 14px; white-space: nowrap; }
   .player-row select {
@@ -121,6 +144,7 @@
   .game-picker .scene { text-align: center; padding: 12px; font-size: 16px; font-weight: 600; }
   .game-now { margin: 10px 0 0; font-size: 14px; color: var(--accent); }
   .game-now:empty { display: none; }
+  #bt-status:empty { display: none; }
   #games-status { margin: -8px 0 12px; }
   #games-status:empty { display: none; }
   .bj-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
@@ -339,6 +363,7 @@
         <label class="scene"><input type="radio" name="game" value="blackjack">Blackjack</label>
         <label class="scene"><input type="radio" name="game" value="hangman">Hangman</label>
         <label class="scene"><input type="radio" name="game" value="slots">Slots</label>
+        <label class="scene"><input type="radio" name="game" value="bets">NFL bets</label>
         <label class="scene"><input type="radio" name="game" value="leaderboard">Leaderboard</label>
       </fieldset>
       <div class="status error" id="games-status" role="alert"></div>
@@ -361,6 +386,19 @@
         </div>
         <button type="button" class="bj-rebuy" id="bj-rebuy" hidden>Rebuy $1000</button>
         <div class="status" id="bj-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="bets" hidden>
+        <div class="bj-header">
+          <h2>NFL bets</h2>
+          <span class="bj-chips">Chips <strong id="bt-chips"></strong></span>
+        </div>
+        <p class="hm-hint">Pick a winner at DraftKings' moneyline odds. Bets close at kickoff and pay out when the game ends; a tie gives your chips back.</p>
+        <div class="bj-bets" id="bt-amounts" role="group" aria-label="Bet size"></div>
+        <div class="status error" id="bt-status" role="alert"></div>
+        <div id="bt-weeks"></div>
+        <h3 class="bet-week" id="bt-history-heading" hidden>Your settled bets</h3>
+        <ul class="bet-history" id="bt-history"></ul>
       </section>
 
       <section id="leaderboard" hidden>
@@ -740,6 +778,8 @@
     $("hangman").hidden = game !== "hangman";
     $("slots").hidden = game !== "slots";
     $("leaderboard").hidden = game !== "leaderboard";
+    $("bets").hidden = game !== "bets";
+    if (game === "bets") { betsShown = ""; loadBets(); }
     if (game === "leaderboard") loadPlayers();
     if (game === "blackjack") loadBlackjack();
     if (game === "hangman") loadHangman();
@@ -763,7 +803,9 @@
       showGame(input.value);
       $("games-status").textContent = "";
       try {
-        settingValues = (await api("POST", "/api/settings", { display_mode: input.value })).values;
+        // NFL bets have no screen of their own; the sign shows the games in sports mode
+        const mode = input.value === "bets" ? "sports" : input.value;
+        settingValues = (await api("POST", "/api/settings", { display_mode: mode })).values;
         updateLive();
       } catch (e) {
         $("games-status").textContent = e.message;
@@ -846,6 +888,7 @@
       if (p.bj_hands) parts.push(`blackjack ${p.bj_wins}/${p.bj_hands}`);
       if (p.slot_spins) parts.push(`${p.slot_spins} spin${p.slot_spins === 1 ? "" : "s"}${p.slot_jackpots ? `, ${p.slot_jackpots} jackpot${p.slot_jackpots === 1 ? "" : "s"}` : ""}`);
       if (p.hm_wins || p.hm_losses) parts.push(`hangman ${p.hm_wins}\u2013${p.hm_losses}`);
+      if (p.bets_won || p.bets_lost) parts.push(`NFL bets ${p.bets_won}\u2013${p.bets_lost}`);
       stats.textContent = parts.join(" \u00b7 ");
       row.append(rank, name, net, remove, stats);
       board.append(row);
@@ -888,6 +931,101 @@
       $("player-status").textContent = e.message;
     }
   });
+
+  // ---- NFL bets ----
+  let betAmount = 25;
+  let betsShown = "";
+  const oddsText = (odds) => (odds == null ? "EVEN" : odds > 0 ? `+${odds}` : `\u2212${-odds}`);
+  const kickoffText = (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function showBets(book) {
+    // Only rebuild when something changed, so a tap never lands on a button being replaced
+    const key = JSON.stringify([book.weeks, book.chips, book.history, betAmount]);
+    if (key === betsShown) return;
+    betsShown = key;
+    $("bt-chips").textContent = `$${book.chips}`;
+    $("bt-amounts").textContent = "";
+    if (!book.amounts.includes(betAmount)) betAmount = book.amounts[0];
+    book.amounts.forEach((amount) => {
+      const button = element("button", "", `$${amount}`);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(amount === betAmount));
+      button.addEventListener("click", () => { betAmount = amount; showBets(book); });
+      $("bt-amounts").append(button);
+    });
+    const weeks = $("bt-weeks");
+    weeks.textContent = "";
+    if (!book.weeks.length) weeks.append(element("p", "empty", "Loading this week's games\u2026"));
+    book.weeks.forEach((week) => {
+      // Finished games only matter if you have a bet on them (settled ones are in the history)
+      const games = week.games.filter((game) => game.state !== "post" || game.my_bet);
+      if (!games.length) return;
+      weeks.append(element("h3", "bet-week", week.label));
+      games.forEach((game) => {
+        const card = element("div", "bet-game");
+        const top = element("div", "bet-top");
+        const live = game.state === "in" || game.state === "post";
+        const score = `${game.away.abbr} ${game.away.score} \u2013 ${game.home.abbr} ${game.home.score}`;
+        top.append(element("span", "", live ? score : game.label),
+                   element("span", "when", game.state === "pre" ? kickoffText(game.kickoff) : game.status));
+        card.append(top);
+        const bet = game.my_bet;
+        if (bet) {
+          const mine = element("div", "bet-mine", `Your $${bet.amount} on ${bet.team} (${oddsText(bet.odds)}) \u00b7 to win $${bet.to_win}`);
+          if (game.open) {
+            const cancel = element("button", "", "Cancel");
+            cancel.type = "button";
+            cancel.addEventListener("click", () => betAction({ action: "cancel", bet: bet.id }));
+            mine.append(cancel);
+          }
+          card.append(mine);
+        } else if (game.open) {
+          const picks = element("div", "bet-picks");
+          ["away", "home"].forEach((side) => {
+            const team = game[side];
+            const button = element("button", "", team.abbr);
+            button.type = "button";
+            button.append(element("span", "odds", oddsText(team.odds)));
+            button.setAttribute("aria-label", `Bet $${betAmount} on ${team.name || team.abbr} at ${oddsText(team.odds)}`);
+            button.addEventListener("click", () => betAction({ action: "place", game: game.id, team: team.abbr, amount: betAmount }));
+            picks.append(button);
+          });
+          card.append(picks);
+        }
+        weeks.append(card);
+      });
+    });
+    $("bt-history").textContent = "";
+    $("bt-history-heading").hidden = !book.history.length;
+    book.history.forEach((bet) => {
+      const row = element("li");
+      row.append(element("span", "", `${bet.team} vs ${bet.opponent} \u00b7 $${bet.amount} at ${oddsText(bet.odds)}`));
+      const outcome = { won: `Won +$${bet.payout - bet.amount}`, lost: `Lost \u2212$${bet.amount}`, push: "Tie, refunded" }[bet.status];
+      row.append(element("span", bet.status, outcome));
+      $("bt-history").append(row);
+    });
+  }
+
+  async function loadBets() {
+    try { showBets(await api("GET", viewPath("/api/bets"))); } catch (e) {}
+  }
+
+  async function betAction(body) {
+    $("bt-status").textContent = "";
+    try {
+      betsShown = "";
+      showBets(await api("POST", "/api/bets", asPlayer(body)));
+    } catch (e) {
+      $("bt-status").textContent = e.message;
+    }
+  }
 
   // ---- Slot machine (same chips as blackjack) ----
   let slotsTimer = null;
@@ -950,6 +1088,7 @@
     if (!$("slots").hidden && !slotsTimer) loadSlots();
     if (!$("blackjack").hidden && !blackjackTimer) loadBlackjack();
     if (!$("leaderboard").hidden) loadPlayers();
+    if (!$("bets").hidden) loadBets();
   }, 3000);
   $("sl-rebuy").addEventListener("click", () => slotsAction({ action: "rebuy" }));
 
