@@ -1,6 +1,7 @@
 # Blackjack mode: one player against the dealer, played from the control page and drawn on the sign.
 # Six-deck shoe, dealer stands on all 17s, blackjack pays 3:2, double down on the first two cards.
-# Chips and the last bet are kept in a small JSON file so they survive restarts.
+# Chips and the last bet are kept in a small JSON file so they survive restarts; the slot machine
+# plays with the same chips through spend(), pay() and rebuy().
 import json
 import os
 import random
@@ -101,11 +102,10 @@ class Blackjack:
             elif action == "rebuy":
                 if self.phase == "player" or self.phase == "dealer":
                     return "Finish this hand first"
-                if self.chips >= BETS[0]:
-                    return "You still have chips"
-                self.chips = START_CHIPS
+                error = self.rebuy()
+                if error:
+                    return error
                 self.phase, self.player, self.dealer, self.result = "bet", [], [], ""
-                self._save()
             else:
                 return "Unknown action"
         if self.on_play:
@@ -135,6 +135,29 @@ class Blackjack:
                 "can_double": self.phase == "player" and len(self.player) == 2 and self.chips >= self.hand_bet,
                 "can_rebuy": self.phase in ("bet", "done") and self.chips < BETS[0],
             }
+
+    # ---- the chips, shared with the slot machine ----
+    def spend(self, amount):
+        # Takes the chips if there are enough; returns whether it did
+        with self.lock:
+            if self.chips < amount:
+                return False
+            self.chips -= amount
+            self._save()
+            return True
+
+    def pay(self, amount):
+        with self.lock:
+            self.chips += amount
+            self._save()
+
+    def rebuy(self):
+        with self.lock:
+            if self.chips >= BETS[0]:
+                return "You still have chips"
+            self.chips = START_CHIPS
+            self._save()
+            return None
 
     # ---- game flow ----
     def _deal(self, now):

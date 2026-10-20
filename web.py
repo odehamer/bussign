@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY_BYTES = 2048
@@ -13,7 +14,7 @@ MAX_DRAWING_BODY_BYTES = 64 * 1024  # a whole 64x32 drawing, or a long batch of 
 
 
 def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
-                 get_active_mode, drawing, blackjack, hangman):
+                 get_active_mode, drawing, blackjack, hangman, slots):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -77,6 +78,8 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 self.send_json(200, blackjack.state())
             elif self.path == "/api/hangman":
                 self.send_json(200, hangman.state())
+            elif self.path == "/api/slots":
+                self.send_json(200, slots.state(time.monotonic()))
             elif saved:
                 body = drawing.saved_png(saved.group(1))
                 if body is None:
@@ -147,6 +150,13 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                     return
                 error = blackjack.act(data.get("action"), data.get("amount"))
                 return self.send_json(400, {"error": error}) if error else self.send_json(200, blackjack.state())
+            if self.path == "/api/slots":
+                # {"action": "spin"}, {"action": "bet", "amount": 25} or {"action": "rebuy"}
+                data = self.read_json()
+                if data is None:
+                    return
+                error = slots.act(data.get("action"), data.get("amount"), time.monotonic())
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, slots.state(time.monotonic()))
             if self.path == "/api/hangman":
                 # {"action": "start", "word": "FALCONS"}, {"action": "guess", "letter": "A"},
                 # {"action": "random"} or {"action": "reset"}

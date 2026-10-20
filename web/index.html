@@ -94,7 +94,7 @@
   .scene:has(input:checked) { border-color: var(--accent); background: #0f1d1f; color: var(--accent); }
   .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .game-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
+  .game-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
   .game-picker .scene { text-align: center; padding: 12px; font-size: 16px; font-weight: 600; }
   .game-now { margin: 10px 0 0; font-size: 14px; color: var(--accent); }
   .game-now:empty { display: none; }
@@ -118,6 +118,13 @@
   .bj-play { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
   .bj-play button { padding: 14px 4px; font-size: 17px; }
   .bj-rebuy { width: 100%; margin-top: 10px; }
+  .sl-bets { grid-template-columns: repeat(4, 1fr); }
+  #sl-spin { padding: 18px; font-size: 20px; }
+  .sl-pays { margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .sl-pays summary { cursor: pointer; }
+  .sl-pays table { width: 100%; margin-top: 8px; border-collapse: collapse; }
+  .sl-pays td { padding: 3px 0; }
+  .sl-pays td:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 
   .hm-word { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 4px 0 12px; }
   .hm-word span {
@@ -295,6 +302,7 @@
       <fieldset class="game-picker" id="game-picker" aria-label="Game">
         <label class="scene"><input type="radio" name="game" value="blackjack">Blackjack</label>
         <label class="scene"><input type="radio" name="game" value="hangman">Hangman</label>
+        <label class="scene"><input type="radio" name="game" value="slots">Slots</label>
       </fieldset>
       <div class="status error" id="games-status" role="alert"></div>
 
@@ -316,6 +324,21 @@
         </div>
         <button type="button" class="bj-rebuy" id="bj-rebuy" hidden>Rebuy $1000</button>
         <div class="status" id="bj-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="slots" hidden>
+        <div class="bj-header">
+          <h2>Slot machine</h2>
+          <span class="bj-chips">Chips <strong id="sl-chips"></strong></span>
+        </div>
+        <div class="bj-bets sl-bets" id="sl-bets" role="group" aria-label="Bet size"></div>
+        <button class="primary" type="button" id="sl-spin">Spin</button>
+        <button type="button" class="bj-rebuy" id="sl-rebuy" hidden>Rebuy $1000</button>
+        <div class="status" id="sl-status" role="status" aria-live="polite"></div>
+        <details class="sl-pays">
+          <summary>Payouts (times your bet)</summary>
+          <table id="sl-paytable"></table>
+        </details>
       </section>
 
       <section id="hangman" hidden>
@@ -431,7 +454,7 @@
   let modeSaving = false;
 
   const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
-  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman" };
+  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman", slots: "Slots" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
@@ -672,7 +695,10 @@
     gameInputs().forEach((input) => { input.checked = input.value === game; });
     $("blackjack").hidden = game !== "blackjack";
     $("hangman").hidden = game !== "hangman";
-    if (game === "blackjack") loadBlackjack(); else loadHangman();
+    $("slots").hidden = game !== "slots";
+    if (game === "blackjack") loadBlackjack();
+    if (game === "hangman") loadHangman();
+    if (game === "slots") loadSlots();
   }
 
   async function openGames() {
@@ -698,6 +724,66 @@
       }
     });
   });
+
+  // ---- Slot machine (same chips as blackjack) ----
+  let slotsTimer = null;
+
+  function showSlots(game) {
+    $("sl-chips").textContent = `$${game.chips}`;
+    const spinning = game.phase === "spinning";
+    $("sl-bets").textContent = "";
+    game.bets.forEach((amount) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `$${amount}`;
+      button.setAttribute("aria-pressed", String(amount === game.bet));
+      button.disabled = spinning;
+      button.addEventListener("click", () => slotsAction({ action: "bet", amount }));
+      $("sl-bets").append(button);
+    });
+    $("sl-spin").hidden = game.can_rebuy;
+    $("sl-spin").disabled = spinning;
+    $("sl-spin").textContent = spinning ? "Spinning\u2026" : `Spin ($${game.bet})`;
+    $("sl-rebuy").hidden = !game.can_rebuy;
+    let status = "Pick a bet and spin";
+    if (game.phase === "done") {
+      status = game.line.join(" \u00b7 ") + (game.win ? ` \u2014 you win $${game.win}!` : " \u2014 no win");
+    }
+    if (spinning) status = "";
+    if (game.can_rebuy) status = "Out of chips";
+    $("sl-status").textContent = status;
+    $("sl-status").classList.remove("error");
+    if (!$("sl-paytable").rows.length) {
+      game.paytable.forEach(([line, times]) => {
+        const row = $("sl-paytable").insertRow();
+        row.insertCell().textContent = line;
+        row.insertCell().textContent = `\u00d7${times}`;
+      });
+    }
+    // Watch for the reels to stop
+    clearTimeout(slotsTimer);
+    slotsTimer = spinning ? setTimeout(() => { slotsTimer = null; loadSlots(); }, 300) : null;
+  }
+
+  async function loadSlots() {
+    try { showSlots(await api("GET", "/api/slots")); } catch (e) {}
+  }
+
+  async function slotsAction(body) {
+    try {
+      showSlots(await api("POST", "/api/slots", body));
+      updateLive();
+    } catch (e) {
+      $("sl-status").textContent = e.message;
+      $("sl-status").classList.add("error");
+    }
+  }
+  $("sl-spin").addEventListener("click", () => slotsAction({ action: "spin" }));
+  // Keep chips in step with spins and blackjack hands from other phones
+  setInterval(() => {
+    if (!document.hidden && !$("slots").hidden && !$("tab-games").hidden && !slotsTimer) loadSlots();
+  }, 3000);
+  $("sl-rebuy").addEventListener("click", () => slotsAction({ action: "rebuy" }));
 
   // ---- Blackjack ----
   const SUITS = { H: "\u2665", D: "\u2666", C: "\u2663", S: "\u2660" };
