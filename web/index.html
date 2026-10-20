@@ -118,6 +118,17 @@
   .bet-history li:first-child { border-top: 0; }
   .bet-history .won { color: #3ddc84; }
   .bet-history .lost { color: var(--danger); }
+  #pl-table { display: block; width: 100%; aspect-ratio: 2 / 1; border-radius: 8px; touch-action: none; margin: 10px 0; }
+  .pl-seats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pl-seat { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--panel-edge); background: #0f1115; min-width: 0; }
+  .pl-seat.turn { border-color: var(--accent); }
+  .pl-seat .who { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .pl-seat .who span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pl-seat .group { font-size: 13px; color: var(--muted); }
+  .pl-power { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .pl-power label { color: var(--muted); font-size: 14px; }
+  .pl-power input { flex: 1; accent-color: var(--accent); }
+  #pl-setup .player-row { margin-bottom: 10px; }
   .player-row { display: flex; align-items: center; gap: 12px; }
   .player-row label { color: var(--muted); font-size: 14px; white-space: nowrap; }
   .player-row select {
@@ -363,6 +374,7 @@
         <label class="scene"><input type="radio" name="game" value="blackjack">Blackjack</label>
         <label class="scene"><input type="radio" name="game" value="hangman">Hangman</label>
         <label class="scene"><input type="radio" name="game" value="slots">Slots</label>
+        <label class="scene"><input type="radio" name="game" value="pool">8-ball</label>
         <label class="scene"><input type="radio" name="game" value="bets">NFL bets</label>
         <label class="scene"><input type="radio" name="game" value="leaderboard">Leaderboard</label>
       </fieldset>
@@ -386,6 +398,30 @@
         </div>
         <button type="button" class="bj-rebuy" id="bj-rebuy" hidden>Rebuy $1000</button>
         <div class="status" id="bj-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="pool" hidden>
+        <h2>8-ball pool</h2>
+        <div id="pl-game" hidden>
+          <div class="pl-seats" id="pl-seats"></div>
+          <canvas id="pl-table" width="640" height="320" role="img" aria-label="Pool table. Drag to aim."></canvas>
+          <div class="pl-power">
+            <label for="pl-power">Power</label>
+            <input type="range" id="pl-power" min="0" max="100" value="70">
+          </div>
+          <button class="primary" type="button" id="pl-shoot">Shoot</button>
+          <button class="hm-secondary" type="button" id="pl-place" hidden>Move the cue ball</button>
+        </div>
+        <div class="status" id="pl-status" role="status" aria-live="polite"></div>
+        <div id="pl-setup" hidden>
+          <p class="hm-hint">Drag on the table to aim, set the power, then shoot. Play someone, or practice by yourself.</p>
+          <div class="player-row">
+            <label for="pl-opponent">Against</label>
+            <select id="pl-opponent"></select>
+          </div>
+          <button class="primary" type="button" id="pl-start">Rack 'em</button>
+        </div>
+        <button class="hm-secondary" type="button" id="pl-forfeit" hidden>Quit this game</button>
       </section>
 
       <section id="bets" hidden>
@@ -535,7 +571,8 @@
   let modeSaving = false;
 
   const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
-  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman", slots: "Slots", leaderboard: "the leaderboard" };
+  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman", slots: "Slots", leaderboard: "the leaderboard",
+                       pool: "8-ball pool" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
@@ -779,6 +816,8 @@
     $("slots").hidden = game !== "slots";
     $("leaderboard").hidden = game !== "leaderboard";
     $("bets").hidden = game !== "bets";
+    $("pool").hidden = game !== "pool";
+    if (game === "pool") loadPool();
     if (game === "bets") { betsShown = ""; loadBets(); }
     if (game === "leaderboard") loadPlayers();
     if (game === "blackjack") loadBlackjack();
@@ -930,6 +969,196 @@
     } catch (e) {
       $("player-status").textContent = e.message;
     }
+  });
+
+  // ---- 8-ball pool ----
+  // The table is drawn here from the ball positions the sign sends; dragging aims the shot
+  const PL_SCALE = 10;
+  const PL_COLORS = { 0: "#fff", 8: "#111", 1: "#ffd200", 2: "#1e50ff", 3: "#ff1e1e", 4: "#aa28ff",
+                      5: "#ff7800", 6: "#78ff78", 7: "#c83c5a" };
+  const PL_POCKETS = [[1.7, 1.7], [32, 1], [62.3, 1.7], [1.7, 30.3], [32, 31], [62.3, 30.3]];
+  let poolGame = null;
+  let poolTimer = null;
+  let poolAim = null;          // the angle while you're aiming, ahead of what the sign has
+  let poolPlacing = false;
+  let poolAimSent = 0;
+  const poolCanvas = $("pl-table");
+  const poolContext = poolCanvas.getContext("2d");
+
+  function drawPoolTable() {
+    const game = poolGame;
+    const c = poolContext;
+    c.fillStyle = "#6e3c19";
+    c.fillRect(0, 0, 640, 320);
+    c.fillStyle = "#003c19";
+    c.fillRect(10, 10, 620, 300);
+    c.fillStyle = "#005f2d";
+    c.fillRect(20, 20, 600, 280);
+    c.fillStyle = "#000";
+    PL_POCKETS.forEach(([x, y]) => { c.beginPath(); c.arc(x * PL_SCALE, y * PL_SCALE, 17, 0, Math.PI * 2); c.fill(); });
+    const cue = game.balls.find((b) => b[0] === 0);
+    const aiming = game.phase === "aim" && cue;
+    if (aiming) {
+      const angle = poolAim ?? game.aim;
+      let end = game.aim_line;
+      if (!end || Math.abs(angle - game.aim) > 1e-3) {
+        // Straight to the cushion until the sign has worked out the real line
+        const [x0, x1, y0, y1] = game.bounds;
+        const dx = Math.cos(angle), dy = Math.sin(angle);
+        const t = Math.min(dx > 0 ? (x1 - cue[1]) / dx : dx < 0 ? (x0 - cue[1]) / dx : Infinity,
+                           dy > 0 ? (y1 - cue[2]) / dy : dy < 0 ? (y0 - cue[2]) / dy : Infinity);
+        end = [cue[1] + dx * t, cue[2] + dy * t];
+      }
+      c.setLineDash([8, 8]);
+      c.strokeStyle = "rgba(255,255,255,0.6)";
+      c.lineWidth = 2;
+      c.beginPath();
+      c.moveTo(cue[1] * PL_SCALE, cue[2] * PL_SCALE);
+      c.lineTo(end[0] * PL_SCALE, end[1] * PL_SCALE);
+      c.stroke();
+      c.setLineDash([]);
+      if (game.ghost && Math.abs(angle - game.aim) <= 1e-3) {
+        c.strokeStyle = "rgba(255,255,255,0.7)";
+        c.beginPath();
+        c.arc(game.ghost[0] * PL_SCALE, game.ghost[1] * PL_SCALE, PL_SCALE, 0, Math.PI * 2);
+        c.stroke();
+      }
+    }
+    game.balls.forEach(([n, x, y]) => {
+      c.fillStyle = PL_COLORS[n > 8 ? n - 8 : n];
+      c.beginPath();
+      c.arc(x * PL_SCALE, y * PL_SCALE, PL_SCALE, 0, Math.PI * 2);
+      c.fill();
+      if (n > 8) {
+        // Stripes: a white band across the middle
+        c.save();
+        c.clip();
+        c.fillStyle = "#fff";
+        c.fillRect(x * PL_SCALE - PL_SCALE, y * PL_SCALE - 3, PL_SCALE * 2, 6);
+        c.restore();
+      }
+    });
+    if (poolPlacing) {
+      c.fillStyle = "rgba(255,255,255,0.15)";
+      c.fillRect(30, 30, 580, 260);
+    }
+  }
+
+  function showPool(game) {
+    poolGame = game;
+    const playing = game.phase === "aim" || game.phase === "rolling";
+    $("pl-game").hidden = game.phase === "none";
+    $("pl-setup").hidden = playing;
+    $("pl-forfeit").hidden = !(playing && game.in_game);
+    if (game.phase !== "aim" || !game.my_turn) poolAim = null;
+    if (!game.ball_in_hand || !game.my_turn) poolPlacing = false;
+    $("pl-seats").textContent = "";
+    game.seats.forEach((seat, i) => {
+      const box = element("div", "pl-seat" + (playing && (game.practice || game.turn === i) ? " turn" : ""));
+      const who = element("div", "who");
+      const dot = element("span", "player-dot");
+      dot.style.background = `rgb(${seat.color.join(",")})`;
+      // Practice is you against yourself, so the two sides are numbered
+      who.append(dot, element("span", "", seat.name + (game.practice ? ` \u00b7 side ${i + 1}` : "")));
+      const group = seat.group ? `${seat.group === "solids" ? "Solids" : "Stripes"} \u00b7 ${seat.left} left` : "Open table";
+      box.append(who, element("div", "group", group));
+      $("pl-seats").append(box);
+    });
+    const myShot = game.phase === "aim" && game.my_turn;
+    $("pl-shoot").disabled = !myShot;
+    $("pl-shoot").textContent = game.phase === "rolling" ? "Rolling\u2026" : game.break_shot && myShot ? "Break" : "Shoot";
+    $("pl-place").hidden = !(myShot && game.ball_in_hand);
+    $("pl-place").textContent = poolPlacing ? "Tap the table to place it" : "Move the cue ball";
+    if (document.activeElement !== $("pl-power") && poolAim === null) $("pl-power").value = Math.round(game.power * 100);
+    let status = "";
+    const shooter = game.seats[game.turn];
+    if (game.phase === "aim") {
+      status = myShot ? (game.break_shot ? "Your break" : "Your shot") : `${shooter.name}'s shot`;
+      if (game.ball_in_hand) status += " \u00b7 ball in hand";
+    }
+    if (game.message && game.phase !== "over") status += (status ? " \u00b7 " : "") + game.message.toLowerCase();
+    if (game.phase === "over") status = `${game.winner} wins!` + (game.message ? ` (${game.message.toLowerCase()})` : "");
+    if (game.phase === "none") status = "";
+    $("pl-status").textContent = status;
+    $("pl-status").classList.remove("error");
+    // Opponent choices: everyone else, or practice alone
+    const select = $("pl-opponent");
+    const choice = select.value;
+    select.textContent = "";
+    select.append(new Option("Just me (practice)", playerId));
+    playerList.filter((p) => p.id !== playerId).forEach((p) => select.append(new Option(p.name, p.id)));
+    if ([...select.options].some((o) => o.value === choice)) select.value = choice;
+    $("pl-start").textContent = game.phase === "over" ? "Play again" : "Rack 'em";
+    if (game.phase !== "none") drawPoolTable();
+    // Follow the balls closely while they roll
+    clearTimeout(poolTimer);
+    poolTimer = null;
+    if (!$("pool").hidden && !$("tab-games").hidden) poolTimer = setTimeout(loadPool, game.phase === "rolling" ? 150 : 1000);
+  }
+
+  async function loadPool() {
+    try { showPool(await api("GET", viewPath("/api/pool"))); } catch (e) {}
+  }
+
+  async function poolAction(body) {
+    try {
+      showPool(await api("POST", "/api/pool", asPlayer(body)));
+      if (body.action !== "aim") updateLive();
+      return true;
+    } catch (e) {
+      $("pl-status").textContent = e.message;
+      $("pl-status").classList.add("error");
+      return false;
+    }
+  }
+
+  function poolPower() { return $("pl-power").value / 100; }
+
+  function sendAim(force) {
+    // A few times a second while dragging, so the aim line on the sign follows
+    const now = Date.now();
+    if (!force && now - poolAimSent < 120) return;
+    poolAimSent = now;
+    poolAction({ action: "aim", angle: poolAim ?? poolGame.aim, power: poolPower() });
+  }
+
+  function tablePoint(event) {
+    const box = poolCanvas.getBoundingClientRect();
+    return [(event.clientX - box.left) / box.width * 64, (event.clientY - box.top) / box.height * 32];
+  }
+
+  function aimAt(event) {
+    const cue = poolGame && poolGame.balls.find((b) => b[0] === 0);
+    if (!cue || poolGame.phase !== "aim" || !poolGame.my_turn) return;
+    const [x, y] = tablePoint(event);
+    poolAim = ((Math.atan2(y - cue[2], x - cue[1]) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    drawPoolTable();
+    sendAim(false);
+  }
+
+  poolCanvas.addEventListener("pointerdown", (event) => {
+    if (!poolGame) return;
+    if (poolPlacing) {
+      const [x, y] = tablePoint(event);
+      poolAction({ action: "place", x, y }).then((ok) => { if (ok) { poolPlacing = false; showPool(poolGame); } });
+      return;
+    }
+    poolCanvas.setPointerCapture(event.pointerId);
+    aimAt(event);
+  });
+  poolCanvas.addEventListener("pointermove", (event) => {
+    if (!poolPlacing && poolCanvas.hasPointerCapture(event.pointerId)) aimAt(event);
+  });
+  poolCanvas.addEventListener("pointerup", () => { if (poolAim !== null) sendAim(true); });
+  $("pl-power").addEventListener("change", () => { if (poolGame && poolGame.my_turn) sendAim(true); });
+  $("pl-shoot").addEventListener("click", () => {
+    poolAction({ action: "shoot", angle: poolAim ?? poolGame.aim, power: poolPower() });
+    poolAim = null;
+  });
+  $("pl-place").addEventListener("click", () => { poolPlacing = !poolPlacing; showPool(poolGame); });
+  $("pl-start").addEventListener("click", () => poolAction({ action: "new", opponent: $("pl-opponent").value }));
+  $("pl-forfeit").addEventListener("click", () => {
+    if (confirm("Quit this game? It counts as a loss.")) poolAction({ action: "forfeit" });
   });
 
   // ---- NFL bets ----

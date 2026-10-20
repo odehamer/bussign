@@ -16,7 +16,7 @@ MAX_NAME = 12
 COLORS = [(43, 224, 227), (255, 90, 200), (120, 230, 60), (255, 150, 30), (255, 230, 60), (255, 70, 70),
           (90, 140, 255), (255, 160, 190), (40, 200, 150), (180, 110, 255), (235, 235, 235), (200, 160, 80)]
 STATS = ["rebuys", "biggest_win", "bj_hands", "bj_wins", "slot_spins", "slot_jackpots", "hm_wins", "hm_losses",
-         "bets_won", "bets_lost"]
+         "bets_won", "bets_lost", "pool_wins", "pool_losses"]
 
 
 class Players:
