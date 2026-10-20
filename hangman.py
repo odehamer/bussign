@@ -1,5 +1,6 @@
 # Hangman mode: one person types a secret word on their phone (or picks a random one), the other
-# guesses letters from theirs. The secret never leaves the sign until the game is over.
+# guesses letters from theirs. The secret never leaves the sign until the game is over. Solving
+# is a win for everyone who guessed and a loss for the word-setter, and the other way round.
 import random
 import re
 import threading
@@ -28,7 +29,8 @@ BLACKJACK HANGMAN PUZZLE CHECKERS DOMINO RIDDLE MYSTERY SECRET BIRTHDAY
 
 
 class Hangman:
-    def __init__(self, fonts, on_play=None):
+    def __init__(self, players, fonts, on_play=None):
+        self.players = players      # player profiles, for the win/loss record
         self.fonts = fonts          # {"text": 5x7 font, "tiny": 4x6 font}
         self.on_play = on_play      # called after any action, to put the game on the sign
         self.lock = threading.Lock()
@@ -36,15 +38,19 @@ class Hangman:
         self.word = ""
         self.guessed = []           # letters in the order they were guessed
         self.phase = "setup"        # setup -> playing -> won / lost
+        self.setter = None          # who typed the word (None for a random word)
+        self.guessers = set()       # who has guessed a letter this game
 
     # ---- actions from the control page; each returns an error message or None ----
-    def act(self, action, value=None):
+    def act(self, action, value=None, player=None):
         with self.lock:
+            if not self.players.exists(player):
+                return "Pick a player first"
             if action == "start":
                 word = value.strip().upper() if isinstance(value, str) else ""
                 if not re.fullmatch(r"[A-Z]{%d,%d}" % (MIN_LETTERS, MAX_LETTERS), word):
                     return f"Use one word of {MIN_LETTERS} to {MAX_LETTERS} letters, A to Z only"
-                self._start(word)
+                self._start(word, setter=player)
             elif action == "random":
                 self._start(self.rng.choice([w for w in RANDOM_WORDS if MIN_LETTERS <= len(w) <= MAX_LETTERS]))
             elif action == "guess":
@@ -56,10 +62,14 @@ class Hangman:
                 if letter in self.guessed:
                     return f"{letter} was already guessed"
                 self.guessed.append(letter)
+                if player != self.setter:
+                    self.guessers.add(player)
                 if all(c in self.guessed for c in self.word):
                     self.phase = "won"
                 elif len(self.misses()) >= MAX_MISSES:
                     self.phase = "lost"
+                if self.phase in ("won", "lost"):
+                    self._record(self.phase == "won")
             elif action == "reset":
                 self.word, self.guessed, self.phase = "", [], "setup"
             else:
@@ -68,8 +78,15 @@ class Hangman:
             self.on_play()
         return None
 
-    def _start(self, word):
+    def _start(self, word, setter=None):
         self.word, self.guessed, self.phase = word, [], "playing"
+        self.setter, self.guessers = setter, set()
+
+    def _record(self, solved):
+        for guesser in self.guessers:
+            self.players.record(guesser, hm_wins=int(solved), hm_losses=int(not solved))
+        if self.setter and self.guessers:
+            self.players.record(self.setter, hm_wins=int(not solved), hm_losses=int(solved))
 
     def misses(self):
         return [c for c in self.guessed if c not in self.word]
@@ -85,6 +102,7 @@ class Hangman:
                 "misses": self.misses(),
                 "max_misses": MAX_MISSES,
                 "word": self.word if over else None,
+                "setter": self.players.name(self.setter) if self.setter else "",
                 "min_letters": MIN_LETTERS,
                 "max_letters": MAX_LETTERS,
             }

@@ -1,16 +1,13 @@
 # Blackjack mode: one player against the dealer, played from the control page and drawn on the sign.
 # Six-deck shoe, dealer stands on all 17s, blackjack pays 3:2, double down on the first two cards.
-# Chips and the last bet are kept in a small JSON file so they survive restarts; the slot machine
-# plays with the same chips through spend(), pay() and rebuy().
-import json
-import os
+# Each hand belongs to the player who dealt it, and only they can play it; chips and stats live in
+# the player profiles (players.py), shared with the slot machine.
 import random
 import threading
 import time
 
 import frame
 
-START_CHIPS = 1000
 BETS = [10, 25, 50, 100, 250]
 DECKS = 6
 RESHUFFLE_AT = 52            # cards left in the shoe before a fresh shuffle
@@ -41,14 +38,14 @@ def is_blackjack(cards):
 
 
 class Blackjack:
-    def __init__(self, path, fonts, on_play=None):
-        self.path = path
+    def __init__(self, players, fonts, on_play=None):
+        self.players = players      # player profiles: chips, stats, names
         self.fonts = fonts          # {"text": 5x7 font, "tiny": 4x6 font}
         self.on_play = on_play      # called after any action, to put the game on the sign
         self.lock = threading.RLock()
         self.rng = random.Random()
-        self.chips, self.bet = START_CHIPS, 50
-        self._load()
+        self.bet = 50
+        self.owner = None                   # id of the player whose hand it is
         self.shoe = []
         self.player, self.dealer = [], []   # [(rank, suit, time it appears)]
         self.phase = "bet"                  # bet -> player -> dealer -> done
@@ -59,19 +56,23 @@ class Blackjack:
         self.result_at = 0.0
 
     # ---- actions from the control page; each returns an error message or None ----
-    def act(self, action, amount=None):
+    def act(self, action, amount=None, player=None):
         with self.lock:
             now = time.monotonic()
             self.tick(now)
+            if not self.players.exists(player):
+                return "Pick a player first"
+            in_hand = self.phase in ("player", "dealer")
+            if action in ("hit", "stand", "double") and in_hand and player != self.owner:
+                return f"It's {self.players.name(self.owner)}'s hand"
             if action == "bet":
                 if self.phase not in ("bet", "done"):
                     return "Finish this hand first"
                 if type(amount) is not int or amount not in BETS:
                     return "Pick one of the bet sizes"
                 self.bet = amount
-                self._save()
             elif action == "deal":
-                error = self._deal(now)
+                error = self._deal(now, player)
                 if error:
                     return error
             elif action == "hit":
@@ -90,9 +91,8 @@ class Blackjack:
             elif action == "double":
                 if self.phase != "player" or len(self.player) != 2:
                     return "You can only double on your first two cards"
-                if self.chips < self.hand_bet:
+                if not self.players.spend(player, self.hand_bet):
                     return "Not enough chips to double"
-                self.chips -= self.hand_bet
                 self.hand_bet *= 2
                 self.player.append(self._draw(now))
                 if hand_total(self._cards(self.player))[0] > 21:
@@ -100,29 +100,33 @@ class Blackjack:
                 else:
                     self._stand(now)
             elif action == "rebuy":
-                if self.phase == "player" or self.phase == "dealer":
+                if in_hand and player == self.owner:
                     return "Finish this hand first"
-                error = self.rebuy()
+                error = self.players.rebuy(player)
                 if error:
                     return error
-                self.phase, self.player, self.dealer, self.result = "bet", [], [], ""
             else:
                 return "Unknown action"
         if self.on_play:
             self.on_play()
         return None
 
-    def state(self):
-        # Everything the control page shows
+    def state(self, viewer=None):
+        # Everything the control page shows, from the point of view of the player asking
         with self.lock:
             now = time.monotonic()
             self.tick(now)
             player = self._cards(self.player)
             dealer = self._cards(self.dealer)
             shown_dealer = dealer if self.hole_shown else dealer[:1]
+            mine = viewer is not None and viewer == self.owner
+            chips = self.players.chips(viewer)
+            in_hand = self.phase in ("player", "dealer")
             return {
                 "phase": self.phase,
-                "chips": self.chips,
+                "chips": chips,
+                "owner": self.players.name(self.owner) if self.owner else "",
+                "mine": mine,
                 "bet": self.bet,
                 "bets": BETS,
                 "hand_bet": self.hand_bet,
@@ -132,43 +136,20 @@ class Blackjack:
                 "dealer_total": hand_total(shown_dealer)[0] if shown_dealer else None,
                 "result": self.result,
                 "payout": self.payout,
-                "can_double": self.phase == "player" and len(self.player) == 2 and self.chips >= self.hand_bet,
-                "can_rebuy": self.phase in ("bet", "done") and self.chips < BETS[0],
+                "can_double": mine and self.phase == "player" and len(self.player) == 2 and chips >= self.hand_bet,
+                "can_rebuy": self.players.exists(viewer) and chips < BETS[0] and not (mine and in_hand),
             }
 
-    # ---- the chips, shared with the slot machine ----
-    def spend(self, amount):
-        # Takes the chips if there are enough; returns whether it did
-        with self.lock:
-            if self.chips < amount:
-                return False
-            self.chips -= amount
-            self._save()
-            return True
-
-    def pay(self, amount):
-        with self.lock:
-            self.chips += amount
-            self._save()
-
-    def rebuy(self):
-        with self.lock:
-            if self.chips >= BETS[0]:
-                return "You still have chips"
-            self.chips = START_CHIPS
-            self._save()
-            return None
-
     # ---- game flow ----
-    def _deal(self, now):
+    def _deal(self, now, player):
         if self.phase in ("player", "dealer"):
-            return "Finish this hand first"
-        if self.chips < self.bet:
-            return "Not enough chips for that bet" if self.chips >= BETS[0] else "Out of chips. Tap Rebuy"
+            return f"{self.players.name(self.owner)} is still playing a hand"
+        if not self.players.spend(player, self.bet):
+            return "Not enough chips for that bet" if self.players.chips(player) >= BETS[0] else "Out of chips. Tap Rebuy"
         if len(self.shoe) < RESHUFFLE_AT:
             self.shoe = [(rank, suit) for _ in range(DECKS) for suit in SUITS for rank in RANKS]
             self.rng.shuffle(self.shoe)
-        self.chips -= self.bet
+        self.owner = player
         self.hand_bet = self.bet
         self.result, self.payout, self.hole_shown = "", 0, False
         self.player, self.dealer = [], []
@@ -178,7 +159,6 @@ class Blackjack:
         # A blackjack on either side ends the hand right away (the dealer checks for one)
         if is_blackjack(self._cards(self.player)) or is_blackjack(self._cards(self.dealer)):
             self._finish(now + 4 * DEAL_STAGGER, reveal=True)
-        self._save()
         return None
 
     def _stand(self, now):
@@ -216,11 +196,12 @@ class Blackjack:
             self.result, back = "PUSH", bet
         else:
             self.result, back = "LOSE", 0
-        self.chips += back
+        self.players.pay(self.owner, back)
         self.payout = back - bet
+        self.players.record(self.owner, win=max(0, self.payout), bj_hands=1,
+                            bj_wins=1 if self.result in ("WIN", "BLACKJACK") else 0)
         self.phase = "done"
         self.result_at = now
-        self._save()
 
     def _draw(self, at):
         rank, suit = self.shoe.pop()
@@ -231,30 +212,6 @@ class Blackjack:
 
     def _last_card_time(self):
         return max([at for *_, at in self.player + self.dealer] or [0.0])
-
-    # ---- saved chips ----
-    def _load(self):
-        try:
-            with open(self.path) as f:
-                saved = json.load(f)
-            chips, bet = saved.get("chips"), saved.get("bet")
-            if isinstance(chips, int) and chips >= 0:
-                self.chips = chips
-            if bet in BETS:
-                self.bet = bet
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print(f"Couldn't read {self.path}, starting fresh: {e}")
-
-    def _save(self):
-        # Chips already in play count as spent, so quitting mid-hand loses that bet (like a real table)
-        try:
-            with open(self.path + ".tmp", "w") as f:
-                json.dump({"chips": self.chips, "bet": self.bet}, f)
-            os.replace(self.path + ".tmp", self.path)
-        except OSError as e:
-            print(f"Couldn't save blackjack chips: {e}")
 
     # ---- drawing on the sign ----
     def draw(self, canvas, t):
@@ -275,20 +232,23 @@ class Blackjack:
                 draw_centered(canvas, text, 55, 8, WHITE, str(hand_total(shown)[0]))
             if player:
                 draw_centered(canvas, text, 55, 30, WHITE, str(hand_total(self._cards(player))[0]))
+            # Middle: whose hand it is, then the bet or the result
+            owner_color = frame.Color(*self.players.color(self.owner))
+            draw_centered(canvas, tiny, 55, 15, owner_color, self.players.name(self.owner).upper()[:4])
             if self.phase == "done" and t >= self.result_at:
                 word = {"BLACKJACK": "BJ!"}.get(self.result, self.result)
                 color = RESULT_COLORS.get(self.result, WHITE)
-                draw_centered(canvas, tiny, 55, 18, color, word)
+                draw_centered(canvas, tiny, 55, 22, color, word)
             else:
-                draw_centered(canvas, tiny, 55, 18, GOLD, f"${self.hand_bet}")
+                draw_centered(canvas, tiny, 55, 22, GOLD, f"${self.hand_bet}")
 
     def _draw_table(self, canvas):
         text, tiny = self.fonts["text"], self.fonts["tiny"]
         draw_card(canvas, 2, 9, "A", "spades")
         draw_card(canvas, 53, 9, "K", "hearts")
         draw_centered(canvas, text, 32, 8, GOLD, "BLACKJACK")
-        draw_centered(canvas, text, 32, 19, WHITE, f"${self.chips}")
-        draw_centered(canvas, tiny, 32, 28, CYAN, f"BET ${self.bet}")
+        draw_centered(canvas, tiny, 32, 20, WHITE, "DEAL FROM")
+        draw_centered(canvas, tiny, 32, 28, CYAN, "THE GAMES TAB")
 
 
 # ---------------- card pixel art ----------------

@@ -24,6 +24,7 @@ import drawing
 import blackjack
 import hangman
 import slots
+import players as player_profiles
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
@@ -143,7 +144,7 @@ SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
      "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
                  ["ambient", "Ambient"], ["drawing", "Drawing"], ["blackjack", "Blackjack"], ["hangman", "Hangman"],
-                 ["slots", "Slots"], ["auto", "Auto"]]},
+                 ["slots", "Slots"], ["leaderboard", "Leaderboard"], ["auto", "Auto"]]},
     {"key": "ambient_scene", "section": "Mode", "label": "Ambient scene", "type": "choice",
      "options": [["aquarium", "Aquarium"], ["fireplace", "Fireplace"], ["rain", "Rain on the window"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
@@ -1795,8 +1796,10 @@ def show_blackjack():
         update_settings({"display_mode": "blackjack"})
 
 
-card_table = blackjack.Blackjack(os.path.join(APP_DIR, "blackjack.json"),
-                                 {"text": nfl_status_font, "tiny": bus_number_font}, on_play=show_blackjack)
+# Everyone's chips and stats; the chips from before profiles go to the first player made
+game_players = player_profiles.Players(os.path.join(APP_DIR, "players.json"), os.path.join(APP_DIR, "blackjack.json"))
+game_fonts = {"text": nfl_status_font, "tiny": bus_number_font}
+card_table = blackjack.Blackjack(game_players, game_fonts, on_play=show_blackjack)
 
 
 def show_hangman():
@@ -1805,7 +1808,7 @@ def show_hangman():
         update_settings({"display_mode": "hangman"})
 
 
-word_game = hangman.Hangman({"text": nfl_status_font, "tiny": bus_number_font}, on_play=show_hangman)
+word_game = hangman.Hangman(game_players, game_fonts, on_play=show_hangman)
 
 
 def show_slots():
@@ -1814,13 +1817,13 @@ def show_slots():
         update_settings({"display_mode": "slots"})
 
 
-# Same chips as the blackjack table
-slot_machine = slots.SlotMachine(card_table, {"tiny": bus_number_font}, on_play=show_slots)
+slot_machine = slots.SlotMachine(game_players, game_fonts, on_play=show_slots)
 
 # Control page first, so it's up within seconds of a restart even if a data source is slow
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
-                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting, card_table, word_game, slot_machine)
+                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting, card_table, word_game, slot_machine,
+                     game_players)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page
@@ -1898,6 +1901,15 @@ try:
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
             time.sleep(NFL_TICKER_FRAME)
             cycle_start = 0.0  # start a fresh cycle if blackjack mode ends
+            continue
+
+        # Leaderboard: the top three players, picked from the Games tab
+        if mode == "leaderboard":
+            offscreen_canvas.brightness = brightness
+            game_players.draw_leaderboard(offscreen_canvas, game_fonts)
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(0.25)
+            cycle_start = 0.0  # start a fresh cycle if leaderboard mode ends
             continue
 
         # Slots mode: the reels spun from the control page

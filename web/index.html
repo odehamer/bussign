@@ -94,7 +94,30 @@
   .scene:has(input:checked) { border-color: var(--accent); background: #0f1d1f; color: var(--accent); }
   .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .game-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
+  .game-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
+  .player-row { display: flex; align-items: center; gap: 12px; }
+  .player-row label { color: var(--muted); font-size: 14px; white-space: nowrap; }
+  .player-row select {
+    flex: 1; min-width: 0; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--panel-edge);
+    background: #0f1115; color: var(--text); font: inherit; font-weight: 600;
+  }
+  .player-dot { flex: none; width: 14px; height: 14px; border-radius: 50%; background: #4a505a; }
+  #new-player { margin-top: 10px; }
+  #player-status:empty { display: none; }
+  .board { list-style: none; margin: 0; padding: 0; }
+  .board li { display: grid; grid-template-columns: 28px 1fr auto 28px; gap: 4px 10px; align-items: center;
+              padding: 10px 0; border-top: 1px solid var(--panel-edge); }
+  .board li:first-child { border-top: 0; padding-top: 0; }
+  .board .rank { font-weight: 700; color: var(--muted); text-align: center; }
+  .board .name { font-weight: 600; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .board .name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .board .net { font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
+  .board .stats { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
+  .board button.remove {
+    grid-row: 1 / 3; grid-column: 4; width: 28px; height: 28px; border-radius: 50%; border: 0;
+    background: #2a2e35; color: var(--text); font-size: 15px; line-height: 1; cursor: pointer;
+  }
+  .board-note { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
   .game-picker .scene { text-align: center; padding: 12px; font-size: 16px; font-weight: 600; }
   .game-now { margin: 10px 0 0; font-size: 14px; color: var(--accent); }
   .game-now:empty { display: none; }
@@ -299,10 +322,24 @@
     </div>
 
     <div id="tab-games" role="tabpanel" aria-labelledby="tab-btn-games" hidden>
+      <section>
+        <div class="player-row">
+          <span class="player-dot" id="player-dot"></span>
+          <label for="player-select">Playing as</label>
+          <select id="player-select"></select>
+        </div>
+        <form class="pin-row" id="new-player" hidden>
+          <input id="new-player-name" maxlength="12" autocomplete="off" placeholder="Your name" aria-label="New player's name">
+          <button class="primary" type="submit">Add</button>
+        </form>
+        <div class="status error" id="player-status" role="alert"></div>
+      </section>
+
       <fieldset class="game-picker" id="game-picker" aria-label="Game">
         <label class="scene"><input type="radio" name="game" value="blackjack">Blackjack</label>
         <label class="scene"><input type="radio" name="game" value="hangman">Hangman</label>
         <label class="scene"><input type="radio" name="game" value="slots">Slots</label>
+        <label class="scene"><input type="radio" name="game" value="leaderboard">Leaderboard</label>
       </fieldset>
       <div class="status error" id="games-status" role="alert"></div>
 
@@ -324,6 +361,12 @@
         </div>
         <button type="button" class="bj-rebuy" id="bj-rebuy" hidden>Rebuy $1000</button>
         <div class="status" id="bj-status" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="leaderboard" hidden>
+        <h2>Leaderboard</h2>
+        <ol class="board" id="board"></ol>
+        <p class="board-note">Ranked by net worth: chips minus $1000 for each rebuy.</p>
       </section>
 
       <section id="slots" hidden>
@@ -454,7 +497,7 @@
   let modeSaving = false;
 
   const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
-  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman", slots: "Slots" };
+  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman", slots: "Slots", leaderboard: "the leaderboard" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
@@ -696,6 +739,8 @@
     $("blackjack").hidden = game !== "blackjack";
     $("hangman").hidden = game !== "hangman";
     $("slots").hidden = game !== "slots";
+    $("leaderboard").hidden = game !== "leaderboard";
+    if (game === "leaderboard") loadPlayers();
     if (game === "blackjack") loadBlackjack();
     if (game === "hangman") loadHangman();
     if (game === "slots") loadSlots();
@@ -703,6 +748,7 @@
 
   async function openGames() {
     // Open on whichever game is on the sign, otherwise the last one picked
+    loadPlayers();
     try {
       const data = await api("GET", "/api/settings");
       settingValues = data.values;
@@ -723,6 +769,124 @@
         $("games-status").textContent = e.message;
       }
     });
+  });
+
+  // ---- Players: each phone remembers who's playing on it ----
+  let playerList = [];
+  let playerId = "";
+  try { playerId = localStorage.getItem("signPlayer") || ""; } catch (e) {}
+
+  function choosePlayer(id) {
+    playerId = id;
+    try { localStorage.setItem("signPlayer", id); } catch (e) {}
+  }
+
+  // Game requests say who's playing; GETs ask for that player's view
+  const asPlayer = (body) => ({ ...body, player: playerId });
+  const viewPath = (path) => `${path}?player=${encodeURIComponent(playerId)}`;
+
+  function showPlayers() {
+    if (!playerList.some((p) => p.id === playerId)) choosePlayer("");
+    const select = $("player-select");
+    select.textContent = "";
+    if (!playerId) select.append(new Option("Pick a player\u2026", ""));
+    [...playerList].sort((a, b) => a.name.localeCompare(b.name)).forEach((p) => select.append(new Option(p.name, p.id)));
+    select.append(new Option("+ New player", "new"));
+    select.value = playerId;
+    const me = playerList.find((p) => p.id === playerId);
+    $("player-dot").style.background = me ? `rgb(${me.color.join(",")})` : "";
+    $("new-player").hidden = playerList.length > 0 && $("new-player").hidden;
+    if (!playerList.length) $("new-player").hidden = false;
+    showBoard();
+  }
+
+  function showBoard() {
+    const board = $("board");
+    board.textContent = "";
+    if (!playerList.length) {
+      const empty = document.createElement("li");
+      empty.className = "empty";
+      empty.textContent = "No players yet. Add one above.";
+      board.append(empty);
+      return;
+    }
+    playerList.forEach((p, i) => {
+      const row = document.createElement("li");
+      const rank = document.createElement("span");
+      rank.className = "rank";
+      rank.textContent = i + 1;
+      const name = document.createElement("span");
+      name.className = "name";
+      const dot = document.createElement("span");
+      dot.className = "player-dot";
+      dot.style.background = `rgb(${p.color.join(",")})`;
+      const label = document.createElement("span");
+      label.textContent = p.name;
+      name.append(dot, label);
+      const net = document.createElement("span");
+      net.className = "net";
+      net.textContent = `${p.net < 0 ? "\u2212" : ""}$${Math.abs(p.net)}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "remove";
+      remove.textContent = "\u00d7";
+      remove.setAttribute("aria-label", `Remove ${p.name}`);
+      remove.addEventListener("click", async () => {
+        if (!confirm(`Remove ${p.name} and their chips?`)) return;
+        try {
+          playerList = (await api("POST", "/api/players", { action: "delete", player: p.id })).players;
+          showPlayers();
+        } catch (e) { $("player-status").textContent = e.message; }
+      });
+      const stats = document.createElement("span");
+      stats.className = "stats";
+      const parts = [`$${p.chips} chips`];
+      if (p.rebuys) parts.push(`${p.rebuys} rebuy${p.rebuys === 1 ? "" : "s"}`);
+      if (p.biggest_win) parts.push(`best win $${p.biggest_win}`);
+      if (p.bj_hands) parts.push(`blackjack ${p.bj_wins}/${p.bj_hands}`);
+      if (p.slot_spins) parts.push(`${p.slot_spins} spin${p.slot_spins === 1 ? "" : "s"}${p.slot_jackpots ? `, ${p.slot_jackpots} jackpot${p.slot_jackpots === 1 ? "" : "s"}` : ""}`);
+      if (p.hm_wins || p.hm_losses) parts.push(`hangman ${p.hm_wins}\u2013${p.hm_losses}`);
+      stats.textContent = parts.join(" \u00b7 ");
+      row.append(rank, name, net, remove, stats);
+      board.append(row);
+    });
+  }
+
+  async function loadPlayers() {
+    try {
+      playerList = (await api("GET", "/api/players")).players;
+      showPlayers();
+    } catch (e) {}
+  }
+
+  $("player-select").addEventListener("change", () => {
+    const value = $("player-select").value;
+    $("player-status").textContent = "";
+    if (value === "new") {
+      $("new-player").hidden = false;
+      $("player-select").value = playerId;
+      $("new-player-name").focus();
+      return;
+    }
+    choosePlayer(value);
+    showPlayers();
+    showGame(currentGame);  // reload the game for this player's chips
+  });
+
+  $("new-player").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    $("player-status").textContent = "";
+    try {
+      const data = await api("POST", "/api/players", { action: "create", name: $("new-player-name").value });
+      playerList = data.players;
+      choosePlayer(data.id);
+      $("new-player-name").value = "";
+      $("new-player").hidden = true;
+      showPlayers();
+      showGame(currentGame);
+    } catch (e) {
+      $("player-status").textContent = e.message;
+    }
   });
 
   // ---- Slot machine (same chips as blackjack) ----
@@ -749,7 +913,8 @@
     if (game.phase === "done") {
       status = game.line.join(" \u00b7 ") + (game.win ? ` \u2014 you win $${game.win}!` : " \u2014 no win");
     }
-    if (spinning) status = "";
+    if (spinning) status = game.mine ? "" : `${game.spinner} is spinning\u2026`;
+    else if (game.phase === "done" && !game.mine && game.spinner) status = `${game.spinner}: ${status}`;
     if (game.can_rebuy) status = "Out of chips";
     $("sl-status").textContent = status;
     $("sl-status").classList.remove("error");
@@ -766,12 +931,12 @@
   }
 
   async function loadSlots() {
-    try { showSlots(await api("GET", "/api/slots")); } catch (e) {}
+    try { showSlots(await api("GET", viewPath("/api/slots"))); } catch (e) {}
   }
 
   async function slotsAction(body) {
     try {
-      showSlots(await api("POST", "/api/slots", body));
+      showSlots(await api("POST", "/api/slots", asPlayer(body)));
       updateLive();
     } catch (e) {
       $("sl-status").textContent = e.message;
@@ -779,9 +944,12 @@
     }
   }
   $("sl-spin").addEventListener("click", () => slotsAction({ action: "spin" }));
-  // Keep chips in step with spins and blackjack hands from other phones
+  // Keep chips and hands in step with other phones
   setInterval(() => {
-    if (!document.hidden && !$("slots").hidden && !$("tab-games").hidden && !slotsTimer) loadSlots();
+    if (document.hidden || $("tab-games").hidden) return;
+    if (!$("slots").hidden && !slotsTimer) loadSlots();
+    if (!$("blackjack").hidden && !blackjackTimer) loadBlackjack();
+    if (!$("leaderboard").hidden) loadPlayers();
   }, 3000);
   $("sl-rebuy").addEventListener("click", () => slotsAction({ action: "rebuy" }));
 
@@ -821,31 +989,32 @@
     });
     $("bj-deal").hidden = !betting || game.can_rebuy;
     $("bj-deal").textContent = `${game.phase === "done" ? "Deal again" : "Deal"} ($${game.bet})`;
-    $("bj-play").hidden = game.phase !== "player";
+    // Only the player whose hand it is can hit, stand or double
+    $("bj-play").hidden = game.phase !== "player" || !game.mine;
     $("bj-double").disabled = !game.can_double;
     $("bj-rebuy").hidden = !game.can_rebuy;
     let status = "Pick a bet and deal";
-    if (game.phase === "player") status = `Betting $${game.hand_bet}`;
+    if (game.phase === "player") status = game.mine ? `Betting $${game.hand_bet}` : `${game.owner} is playing a hand`;
     if (game.phase === "dealer") status = "Dealer's turn\u2026";
     if (game.phase === "done") {
       const amount = game.payout ? ` (${game.payout > 0 ? "+" : "\u2212"}$${Math.abs(game.payout)})` : "";
-      status = RESULT_TEXT[game.result] + amount;
+      status = (game.mine ? "" : `${game.owner}: `) + RESULT_TEXT[game.result] + amount;
     }
     if (game.can_rebuy) status = "Out of chips";
     $("bj-status").textContent = status;
     $("bj-status").classList.remove("error");
     // Follow the dealer's cards as they come out
     clearTimeout(blackjackTimer);
-    if (game.phase === "dealer") blackjackTimer = setTimeout(loadBlackjack, 400);
+    blackjackTimer = game.phase === "dealer" ? setTimeout(() => { blackjackTimer = null; loadBlackjack(); }, 400) : null;
   }
 
   async function loadBlackjack() {
-    try { showBlackjack(await api("GET", "/api/blackjack")); } catch (e) {}
+    try { showBlackjack(await api("GET", viewPath("/api/blackjack"))); } catch (e) {}
   }
 
   async function blackjackAction(action, amount) {
     try {
-      showBlackjack(await api("POST", "/api/blackjack", { action, amount }));
+      showBlackjack(await api("POST", "/api/blackjack", asPlayer({ action, amount })));
       updateLive();
     } catch (e) {
       $("bj-status").textContent = e.message;
@@ -914,7 +1083,7 @@
 
   async function hangmanAction(body) {
     try {
-      showHangman(await api("POST", "/api/hangman", body));
+      showHangman(await api("POST", "/api/hangman", asPlayer(body)));
       updateLive();
       return true;
     } catch (e) {

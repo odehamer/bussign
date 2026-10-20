@@ -1,5 +1,5 @@
-# Slot machine mode: three reels of pixel fruit, spun from the control page. It plays with the same
-# chips as blackjack (the wallet is the Blackjack table, which saves them).
+# Slot machine mode: three reels of pixel fruit, spun from the control page. Each spin is paid from
+# and into the chips of the player who spun (players.py), the same chips blackjack uses.
 import random
 import threading
 
@@ -132,8 +132,8 @@ def make_background():
 
 
 class SlotMachine:
-    def __init__(self, wallet, fonts, on_play=None):
-        self.wallet = wallet        # the blackjack table: spend(), pay(), chips, rebuy()
+    def __init__(self, players, fonts, on_play=None):
+        self.players = players      # player profiles: chips, stats, names
         self.fonts = fonts          # {"tiny": 4x6 font}
         self.on_play = on_play      # called after any action, to put the machine on the sign
         self.lock = threading.Lock()
@@ -145,12 +145,15 @@ class SlotMachine:
         self.bet = 25
         self.spin_bet = 0
         self.win = 0
+        self.spinner = None         # id of the player whose spin is on the reels
         self.background = make_background()
 
     # ---- actions from the control page; each returns an error message or None ----
-    def act(self, action, amount, now):
+    def act(self, action, amount, now, player=None):
         with self.lock:
             self.tick(now)
+            if not self.players.exists(player):
+                return "Pick a player first"
             if action == "bet":
                 if self.phase == "spinning":
                     return "Wait for the reels to stop"
@@ -160,14 +163,15 @@ class SlotMachine:
             elif action == "spin":
                 if self.phase == "spinning":
                     return "The reels are still spinning"
-                if not self.wallet.spend(self.bet):
-                    return "Not enough chips for that bet" if self.wallet.chips >= BETS[0] else "Out of chips. Tap Rebuy"
+                if not self.players.spend(player, self.bet):
+                    return "Not enough chips for that bet" if self.players.chips(player) >= BETS[0] else "Out of chips. Tap Rebuy"
                 self.stops = [self.rng.randrange(len(s)) for s in self.strips]
                 self.started, self.phase, self.spin_bet, self.win = now, "spinning", self.bet, 0
+                self.spinner = player
             elif action == "rebuy":
-                if self.phase == "spinning":
+                if self.phase == "spinning" and player == self.spinner:
                     return "Wait for the reels to stop"
-                error = self.wallet.rebuy()
+                error = self.players.rebuy(player)
                 if error:
                     return error
             else:
@@ -179,27 +183,34 @@ class SlotMachine:
     def tick(self, now):
         # Pay out once the last reel has stopped
         if self.phase == "spinning" and now - self.started >= SPIN_SECONDS[-1]:
-            self.win = self.spin_bet * payout_multiplier(self.line())
+            line = self.line()
+            self.win = self.spin_bet * payout_multiplier(line)
             if self.win:
-                self.wallet.pay(self.win)
+                self.players.pay(self.spinner, self.win)
+            self.players.record(self.spinner, win=self.win - self.spin_bet, slot_spins=1,
+                                slot_jackpots=1 if line == ["seven"] * 3 else 0)
             self.phase = "done"
 
     def line(self):
         return [strip[stop] for strip, stop in zip(self.strips, self.stops)]
 
-    def state(self, now):
+    def state(self, now, viewer=None):
         with self.lock:
             self.tick(now)
             spinning = self.phase == "spinning"
+            chips = self.players.chips(viewer)
             return {
                 "phase": self.phase,
-                "chips": self.wallet.chips,
+                "chips": chips,
+                "spinner": self.players.name(self.spinner) if self.spinner else "",
+                "mine": viewer is not None and viewer == self.spinner,
                 "bet": self.bet,
                 "bets": BETS,
                 "spin_bet": self.spin_bet,
                 "line": None if spinning else [NAMES[name] for name in self.line()],
                 "win": 0 if spinning else self.win,
-                "can_rebuy": not spinning and self.wallet.chips < BETS[0],
+                "can_rebuy": self.players.exists(viewer) and chips < BETS[0]
+                             and not (spinning and viewer == self.spinner),
                 "paytable": [[f"{NAMES[n]} {NAMES[n]} {NAMES[n]}", THREE_OF_A_KIND[n]] for n in THREE_OF_A_KIND]
                             + [["Two cherries", CHERRY_PAYS[2]], ["One cherry", CHERRY_PAYS[1]]],
             }
@@ -225,10 +236,14 @@ class SlotMachine:
                 text = f"WIN ${self.win}"
                 width = sum(tiny.CharacterWidth(ord(c)) for c in text)
                 frame.DrawText(canvas, tiny, 32 - width // 2, 30, GREEN if blink else GOLD, text)
+            elif self.spinner:
+                # Whose spin it is, and their chips
+                name = self.players.name(self.spinner).upper()[:7]
+                frame.DrawText(canvas, tiny, 2, 30, frame.Color(*self.players.color(self.spinner)), name)
+                chips = f"${self.players.chips(self.spinner)}"
+                frame.DrawText(canvas, tiny, 62 - sum(tiny.CharacterWidth(ord(c)) for c in chips), 30, GOLD, chips)
             else:
-                frame.DrawText(canvas, tiny, 2, 30, GOLD, f"${self.wallet.chips}")
-                bet = f"BET {self.bet}"
-                frame.DrawText(canvas, tiny, 62 - sum(tiny.CharacterWidth(ord(c)) for c in bet), 30, GRAY, bet)
+                frame.DrawText(canvas, tiny, 2, 30, GRAY, "SPIN FROM GAMES")
 
     def _reel_position(self, reel, t):
         # Fractional index on the strip under the payline; the reel slows down as it stops

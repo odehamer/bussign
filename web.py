@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+from urllib.parse import parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY_BYTES = 2048
@@ -14,7 +15,7 @@ MAX_DRAWING_BODY_BYTES = 64 * 1024  # a whole 64x32 drawing, or a long batch of 
 
 
 def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
-                 get_active_mode, drawing, blackjack, hangman, slots):
+                 get_active_mode, drawing, blackjack, hangman, slots, players):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -49,6 +50,9 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
 
         def do_GET(self):
             saved = re.fullmatch(r"/api/drawings/(\d{10,16})\.png", self.path)
+            # Game states are shown from one player's point of view: /api/blackjack?player=ID
+            route, _, query = self.path.partition("?")
+            viewer = (parse_qs(query).get("player") or [None])[0]
             if self.path in ("/", "/index.html"):
                 with open(page_path, "rb") as f:
                     body = f.read()
@@ -74,12 +78,14 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                                      "image": base64.b64encode(drawing.get_bytes()).decode()})
             elif self.path == "/api/drawings":
                 self.send_json(200, {"drawings": drawing.list_saved()})
-            elif self.path == "/api/blackjack":
-                self.send_json(200, blackjack.state())
-            elif self.path == "/api/hangman":
+            elif route == "/api/blackjack":
+                self.send_json(200, blackjack.state(viewer))
+            elif route == "/api/hangman":
                 self.send_json(200, hangman.state())
-            elif self.path == "/api/slots":
-                self.send_json(200, slots.state(time.monotonic()))
+            elif route == "/api/slots":
+                self.send_json(200, slots.state(time.monotonic(), viewer))
+            elif route == "/api/players":
+                self.send_json(200, {"players": players.public()})
             elif saved:
                 body = drawing.saved_png(saved.group(1))
                 if body is None:
@@ -148,15 +154,31 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 data = self.read_json()
                 if data is None:
                     return
-                error = blackjack.act(data.get("action"), data.get("amount"))
-                return self.send_json(400, {"error": error}) if error else self.send_json(200, blackjack.state())
+                player = data.get("player")
+                error = blackjack.act(data.get("action"), data.get("amount"), player)
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, blackjack.state(player))
             if self.path == "/api/slots":
                 # {"action": "spin"}, {"action": "bet", "amount": 25} or {"action": "rebuy"}
                 data = self.read_json()
                 if data is None:
                     return
-                error = slots.act(data.get("action"), data.get("amount"), time.monotonic())
-                return self.send_json(400, {"error": error}) if error else self.send_json(200, slots.state(time.monotonic()))
+                player = data.get("player")
+                error = slots.act(data.get("action"), data.get("amount"), time.monotonic(), player)
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, slots.state(time.monotonic(), player))
+            if self.path == "/api/players":
+                # {"action": "create", "name": "Sam"} or {"action": "delete", "player": ID}
+                data = self.read_json()
+                if data is None:
+                    return
+                if data.get("action") == "create":
+                    player_id, error = players.create(data.get("name"))
+                    if error:
+                        return self.send_json(400, {"error": error})
+                    return self.send_json(201, {"id": player_id, "players": players.public()})
+                if data.get("action") == "delete":
+                    error = players.delete(data.get("player"))
+                    return self.send_json(404, {"error": error}) if error else self.send_json(200, {"players": players.public()})
+                return self.send_json(400, {"error": "Unknown action"})
             if self.path == "/api/hangman":
                 # {"action": "start", "word": "FALCONS"}, {"action": "guess", "letter": "A"},
                 # {"action": "random"} or {"action": "reset"}
@@ -164,7 +186,7 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 if data is None:
                     return
                 action = data.get("action")
-                error = hangman.act(action, data.get("word") if action == "start" else data.get("letter"))
+                error = hangman.act(action, data.get("word") if action == "start" else data.get("letter"), data.get("player"))
                 return self.send_json(400, {"error": error}) if error else self.send_json(200, hangman.state())
             if load:
                 if self.read_json() is None:
