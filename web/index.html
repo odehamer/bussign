@@ -94,6 +94,12 @@
   .scene:has(input:checked) { border-color: var(--accent); background: #0f1d1f; color: var(--accent); }
   .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  .game-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 16px; padding: 0; border: 0; }
+  .game-picker .scene { text-align: center; padding: 12px; font-size: 16px; font-weight: 600; }
+  .game-now { margin: 10px 0 0; font-size: 14px; color: var(--accent); }
+  .game-now:empty { display: none; }
+  #games-status { margin: -8px 0 12px; }
+  #games-status:empty { display: none; }
   .bj-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
   .bj-header h2 { margin: 0; }
   .bj-chips { font-size: 15px; color: var(--muted); }
@@ -138,7 +144,7 @@
   .hm-hint { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
 
   .tabs {
-    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
   }
   .tabs button {
@@ -233,17 +239,64 @@
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tab-btn-sign" aria-selected="true" aria-controls="tab-sign">Sign</button>
       <button type="button" role="tab" id="tab-btn-draw" aria-selected="false" aria-controls="tab-draw">Draw</button>
+      <button type="button" role="tab" id="tab-btn-games" aria-selected="false" aria-controls="tab-games">Games</button>
       <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
     </div>
 
     <div id="tab-sign" role="tabpanel" aria-labelledby="tab-btn-sign">
-      <section class="live">
+      <!-- The live view moves between the Sign and Games tabs -->
+      <section class="live" id="live-section">
         <div class="live-header">
           <h2>On the sign now</h2>
           <span class="live-state" id="live-state" role="status">Connecting…</span>
         </div>
         <canvas id="live" width="640" height="320" role="img" aria-label="Live view of the sign"></canvas>
       </section>
+
+      <section>
+        <h2 id="modes-heading">Mode</h2>
+        <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
+          <label class="mode">
+            <input type="radio" name="mode" value="normal">
+            <span><span class="mode-name">Normal</span><span class="mode-desc">Clock, weather &amp; bus times</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="music">
+            <span><span class="mode-name">Music</span><span class="mode-desc">Album cover with the song and artist</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="sports">
+            <span><span class="mode-name">Sports</span><span class="mode-desc">This week's football games, on a loop</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="ambient">
+            <span><span class="mode-name">Ambient</span><span class="mode-desc">A calm moving scene. Pick one below</span></span>
+          </label>
+          <fieldset class="scenes" id="scenes" aria-label="Ambient scene" hidden>
+            <label class="scene"><input type="radio" name="scene" value="aquarium">Aquarium</label>
+            <label class="scene"><input type="radio" name="scene" value="fireplace">Fireplace</label>
+            <label class="scene"><input type="radio" name="scene" value="rain">Rain on the window</label>
+          </fieldset>
+          <label class="mode">
+            <input type="radio" name="mode" value="drawing">
+            <span><span class="mode-name">Drawing</span><span class="mode-desc">Your pixel art from the Draw tab</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="auto">
+            <span><span class="mode-name">Auto</span><span class="mode-desc">Music while Spotify plays, sports during live games, otherwise normal<span class="mode-now" id="auto-now"></span></span></span>
+          </label>
+        </fieldset>
+        <p class="game-now" id="game-now"></p>
+        <div class="status" id="mode-status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+
+    <div id="tab-games" role="tabpanel" aria-labelledby="tab-btn-games" hidden>
+      <fieldset class="game-picker" id="game-picker" aria-label="Game">
+        <label class="scene"><input type="radio" name="game" value="blackjack">Blackjack</label>
+        <label class="scene"><input type="radio" name="game" value="hangman">Hangman</label>
+      </fieldset>
+      <div class="status error" id="games-status" role="alert"></div>
 
       <section id="blackjack" hidden>
         <div class="bj-header">
@@ -283,49 +336,6 @@
         <div class="status" id="hm-status" role="status" aria-live="polite"></div>
       </section>
 
-      <section>
-        <h2 id="modes-heading">Mode</h2>
-        <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
-          <label class="mode">
-            <input type="radio" name="mode" value="normal">
-            <span><span class="mode-name">Normal</span><span class="mode-desc">Clock, weather &amp; bus times</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="music">
-            <span><span class="mode-name">Music</span><span class="mode-desc">Album cover with the song and artist</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="sports">
-            <span><span class="mode-name">Sports</span><span class="mode-desc">This week's football games, on a loop</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="ambient">
-            <span><span class="mode-name">Ambient</span><span class="mode-desc">A calm moving scene. Pick one below</span></span>
-          </label>
-          <fieldset class="scenes" id="scenes" aria-label="Ambient scene" hidden>
-            <label class="scene"><input type="radio" name="scene" value="aquarium">Aquarium</label>
-            <label class="scene"><input type="radio" name="scene" value="fireplace">Fireplace</label>
-            <label class="scene"><input type="radio" name="scene" value="rain">Rain on the window</label>
-          </fieldset>
-          <label class="mode">
-            <input type="radio" name="mode" value="drawing">
-            <span><span class="mode-name">Drawing</span><span class="mode-desc">Your pixel art from the Draw tab</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="blackjack">
-            <span><span class="mode-name">Blackjack</span><span class="mode-desc">Play against the dealer, with the controls above</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="hangman">
-            <span><span class="mode-name">Hangman</span><span class="mode-desc">One player picks a word, the other guesses letters</span></span>
-          </label>
-          <label class="mode">
-            <input type="radio" name="mode" value="auto">
-            <span><span class="mode-name">Auto</span><span class="mode-desc">Music while Spotify plays, sports during live games, otherwise normal<span class="mode-now" id="auto-now"></span></span></span>
-          </label>
-        </fieldset>
-        <div class="status" id="mode-status" role="status" aria-live="polite"></div>
-      </section>
     </div>
 
     <div id="tab-draw" role="tabpanel" aria-labelledby="tab-btn-draw" hidden>
@@ -399,15 +409,19 @@
 
   // ---- Tabs ----
   function showTab(name) {
-    ["sign", "draw", "settings"].forEach((tab) => {
+    ["sign", "draw", "games", "settings"].forEach((tab) => {
       $("tab-" + tab).hidden = tab !== name;
       $("tab-btn-" + tab).setAttribute("aria-selected", String(tab === name));
     });
+    // Both the Sign and Games tabs show the live view at the top
+    if (name === "sign" || name === "games") $("tab-" + name).prepend($("live-section"));
     if (name === "settings") loadSettings();
     if (name === "sign") { loadMode(); updateLive(); }
     if (name === "draw") { loadDrawing(); loadGallery(); }
+    if (name === "games") { openGames(); updateLive(); }
   }
   $("tab-btn-draw").addEventListener("click", () => showTab("draw"));
+  $("tab-btn-games").addEventListener("click", () => showTab("games"));
   $("tab-btn-sign").addEventListener("click", () => showTab("sign"));
   $("tab-btn-settings").addEventListener("click", () => showTab("settings"));
 
@@ -416,18 +430,15 @@
   const sceneInputs = () => document.querySelectorAll('#scenes input[name="scene"]');
   let modeSaving = false;
 
-  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing", blackjack: "Blackjack",
-                       hangman: "Hangman" };
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
+  const GAME_NAMES = { blackjack: "Blackjack", hangman: "Hangman" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
     // The scene choices only show while ambient mode is picked
     $("scenes").hidden = mode !== "ambient";
-    // Blackjack controls sit under the live view while blackjack mode is picked
-    $("blackjack").hidden = mode !== "blackjack";
-    if (mode === "blackjack") loadBlackjack();
-    $("hangman").hidden = mode !== "hangman";
-    if (mode === "hangman") loadHangman();
+    // Games aren't in the mode list; say which one is on the sign
+    $("game-now").textContent = GAME_NAMES[mode] ? `Playing ${GAME_NAMES[mode]} on the sign. Its controls are on the Games tab.` : "";
     sceneInputs().forEach((input) => { input.checked = input.value === settingValues.ambient_scene; });
     // In auto, say which mode is on screen right now
     $("auto-now").textContent = mode === "auto" && MODE_NAMES[activeMode] ? `Showing ${MODE_NAMES[activeMode]} now` : "";
@@ -625,7 +636,7 @@
   }
 
   async function updateLive() {
-    if (liveBusy || document.hidden || $("app").hidden || $("tab-sign").hidden) return;
+    if (liveBusy || document.hidden || $("app").hidden || $("live-section").parentElement.hidden) return;
     liveBusy = true;
     try {
       const response = await fetch("/api/screen.png", { headers: { "X-Pin": pin }, cache: "no-store" });
@@ -651,6 +662,42 @@
     updateLive();
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) updateLive(); });
+
+  // ---- Games tab: pick a game, then play it with the controls below ----
+  const gameInputs = () => document.querySelectorAll('#game-picker input[name="game"]');
+  let currentGame = "blackjack";
+
+  function showGame(game) {
+    currentGame = game;
+    gameInputs().forEach((input) => { input.checked = input.value === game; });
+    $("blackjack").hidden = game !== "blackjack";
+    $("hangman").hidden = game !== "hangman";
+    if (game === "blackjack") loadBlackjack(); else loadHangman();
+  }
+
+  async function openGames() {
+    // Open on whichever game is on the sign, otherwise the last one picked
+    try {
+      const data = await api("GET", "/api/settings");
+      settingValues = data.values;
+      if (GAME_NAMES[data.values.display_mode]) currentGame = data.values.display_mode;
+    } catch (e) {}
+    showGame(currentGame);
+  }
+
+  gameInputs().forEach((input) => {
+    input.addEventListener("change", async () => {
+      // Picking a game puts it on the sign
+      showGame(input.value);
+      $("games-status").textContent = "";
+      try {
+        settingValues = (await api("POST", "/api/settings", { display_mode: input.value })).values;
+        updateLive();
+      } catch (e) {
+        $("games-status").textContent = e.message;
+      }
+    });
+  });
 
   // ---- Blackjack ----
   const SUITS = { H: "\u2665", D: "\u2666", C: "\u2663", S: "\u2660" };
@@ -798,7 +845,7 @@
   $("hm-reset").addEventListener("click", () => hangmanAction({ action: "reset" }));
   setInterval(() => {
     // Don't wipe a secret word that's being typed
-    if (!document.hidden && !$("hangman").hidden && !$("tab-sign").hidden && !$("hm-secret").value) loadHangman();
+    if (!document.hidden && !$("hangman").hidden && !$("tab-games").hidden && !$("hm-secret").value) loadHangman();
   }, 1500);
 
   // ---- Pixel painter ----
