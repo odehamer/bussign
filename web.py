@@ -1,5 +1,5 @@
 # Phone control page for the sign: serves web/index.html, the live screen, and a small JSON API for
-# settings, the pixel painter and blackjack. It only knows about the callbacks main.py hands it, never the display.
+# settings, the pixel painter and the games. It only knows about the callbacks main.py hands it, never the display.
 import base64
 import binascii
 import hmac
@@ -13,7 +13,7 @@ MAX_DRAWING_BODY_BYTES = 64 * 1024  # a whole 64x32 drawing, or a long batch of 
 
 
 def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
-                 get_active_mode, drawing, blackjack):
+                 get_active_mode, drawing, blackjack, hangman):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -75,6 +75,8 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                 self.send_json(200, {"drawings": drawing.list_saved()})
             elif self.path == "/api/blackjack":
                 self.send_json(200, blackjack.state())
+            elif self.path == "/api/hangman":
+                self.send_json(200, hangman.state())
             elif saved:
                 body = drawing.saved_png(saved.group(1))
                 if body is None:
@@ -145,6 +147,15 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                     return
                 error = blackjack.act(data.get("action"), data.get("amount"))
                 return self.send_json(400, {"error": error}) if error else self.send_json(200, blackjack.state())
+            if self.path == "/api/hangman":
+                # {"action": "start", "word": "FALCONS"}, {"action": "guess", "letter": "A"},
+                # {"action": "random"} or {"action": "reset"}
+                data = self.read_json()
+                if data is None:
+                    return
+                action = data.get("action")
+                error = hangman.act(action, data.get("word") if action == "start" else data.get("letter"))
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, hangman.state())
             if load:
                 if self.read_json() is None:
                     return

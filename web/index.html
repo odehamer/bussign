@@ -113,6 +113,30 @@
   .bj-play button { padding: 14px 4px; font-size: 17px; }
   .bj-rebuy { width: 100%; margin-top: 10px; }
 
+  .hm-word { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 4px 0 12px; }
+  .hm-word span {
+    width: 26px; padding-bottom: 2px; border-bottom: 2px solid #4a505a; text-align: center;
+    font-size: 22px; font-weight: 700; min-height: 32px;
+  }
+  .hm-word.won span { color: #3ddc84; }
+  .hm-word.lost span.missed { color: var(--danger); }
+  .hm-misses { text-align: center; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
+  .hm-misses strong { color: var(--danger); letter-spacing: 0.1em; }
+  .hm-keys { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+  .hm-keys button, .hm-secondary {
+    padding: 11px 0; border-radius: 10px; border: 1px solid var(--panel-edge); background: #0f1115;
+    color: var(--text); font-family: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  .hm-keys button.hit { color: #3ddc84; border-color: #1f4a30; }
+  .hm-keys button.miss { color: var(--danger); border-color: #3a2328; }
+  .hm-keys button:disabled { opacity: 0.55; cursor: default; }
+  .hm-secondary { width: 100%; margin-top: 10px; }
+  .hm-setup input {
+    width: 100%; padding: 12px; margin-bottom: 10px; border-radius: 10px; border: 1px solid var(--panel-edge);
+    background: #0f1115; color: var(--text); font: inherit; font-size: 18px; letter-spacing: 0.1em;
+  }
+  .hm-hint { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+
   .tabs {
     display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
@@ -241,6 +265,24 @@
         <div class="status" id="bj-status" role="status" aria-live="polite"></div>
       </section>
 
+      <section id="hangman" hidden>
+        <h2>Hangman</h2>
+        <form class="hm-setup" id="hm-setup" hidden>
+          <p class="hm-hint">Type a secret word without letting the guesser see, or let the sign pick one.</p>
+          <input id="hm-secret" type="password" maxlength="10" autocomplete="off" autocapitalize="characters"
+                 spellcheck="false" placeholder="Secret word" aria-label="Secret word">
+          <button class="primary" type="submit">Start</button>
+          <button class="hm-secondary" type="button" id="hm-random">Random word</button>
+        </form>
+        <div id="hm-play" hidden>
+          <div class="hm-word" id="hm-word" aria-label="The word so far"></div>
+          <div class="hm-misses" id="hm-misses"></div>
+          <div class="hm-keys" id="hm-keys" role="group" aria-label="Guess a letter"></div>
+          <button class="hm-secondary" type="button" id="hm-reset">New game</button>
+        </div>
+        <div class="status" id="hm-status" role="status" aria-live="polite"></div>
+      </section>
+
       <section>
         <h2 id="modes-heading">Mode</h2>
         <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
@@ -272,6 +314,10 @@
           <label class="mode">
             <input type="radio" name="mode" value="blackjack">
             <span><span class="mode-name">Blackjack</span><span class="mode-desc">Play against the dealer, with the controls above</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="hangman">
+            <span><span class="mode-name">Hangman</span><span class="mode-desc">One player picks a word, the other guesses letters</span></span>
           </label>
           <label class="mode">
             <input type="radio" name="mode" value="auto">
@@ -370,7 +416,8 @@
   const sceneInputs = () => document.querySelectorAll('#scenes input[name="scene"]');
   let modeSaving = false;
 
-  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing", blackjack: "Blackjack" };
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing", blackjack: "Blackjack",
+                       hangman: "Hangman" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
@@ -379,6 +426,8 @@
     // Blackjack controls sit under the live view while blackjack mode is picked
     $("blackjack").hidden = mode !== "blackjack";
     if (mode === "blackjack") loadBlackjack();
+    $("hangman").hidden = mode !== "hangman";
+    if (mode === "hangman") loadHangman();
     sceneInputs().forEach((input) => { input.checked = input.value === settingValues.ambient_scene; });
     // In auto, say which mode is on screen right now
     $("auto-now").textContent = mode === "auto" && MODE_NAMES[activeMode] ? `Showing ${MODE_NAMES[activeMode]} now` : "";
@@ -675,6 +724,82 @@
   $("bj-stand").addEventListener("click", () => blackjackAction("stand"));
   $("bj-double").addEventListener("click", () => blackjackAction("double"));
   $("bj-rebuy").addEventListener("click", () => blackjackAction("rebuy"));
+
+  // ---- Hangman ----
+  // Each player can use their own phone; the page checks in often so both stay in step
+  let hangmanShown = "";
+
+  function showHangman(game) {
+    // Only rebuild when something changed, so a tap never lands on a button being replaced
+    const key = JSON.stringify(game);
+    if (key === hangmanShown) return;
+    hangmanShown = key;
+    const over = game.phase === "won" || game.phase === "lost";
+    $("hm-setup").hidden = game.phase !== "setup";
+    $("hm-play").hidden = game.phase === "setup";
+    $("hm-word").textContent = "";
+    $("hm-word").className = "hm-word " + game.phase;
+    game.letters.forEach((letter, i) => {
+      const span = document.createElement("span");
+      span.textContent = letter || "";
+      if (game.phase === "lost" && !game.guessed.includes(letter)) span.className = "missed";
+      $("hm-word").append(span);
+    });
+    $("hm-word").setAttribute("aria-label", game.letters.map((l) => l || "blank").join(" "));
+    $("hm-misses").innerHTML = "";
+    const left = game.max_misses - game.misses.length;
+    $("hm-misses").append(over ? "" : `${left} wrong guess${left === 1 ? "" : "es"} left`);
+    if (game.misses.length) {
+      const strong = document.createElement("strong");
+      strong.textContent = game.misses.join(" ");
+      $("hm-misses").append(over ? "Missed: " : " \u00b7 ", strong);
+    }
+    $("hm-keys").hidden = over;
+    $("hm-keys").textContent = "";
+    for (const letter of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = letter;
+      if (game.guessed.includes(letter)) {
+        button.disabled = true;
+        button.className = game.misses.includes(letter) ? "miss" : "hit";
+      }
+      button.addEventListener("click", () => hangmanAction({ action: "guess", letter }));
+      $("hm-keys").append(button);
+    }
+    $("hm-reset").textContent = over ? "Play again" : "New game";
+    let status = "";
+    if (game.phase === "won") status = `Solved! The word was ${game.word}`;
+    if (game.phase === "lost") status = `Out of guesses. The word was ${game.word}`;
+    $("hm-status").textContent = status;
+    $("hm-status").classList.remove("error");
+  }
+
+  async function loadHangman() {
+    try { showHangman(await api("GET", "/api/hangman")); } catch (e) {}
+  }
+
+  async function hangmanAction(body) {
+    try {
+      showHangman(await api("POST", "/api/hangman", body));
+      updateLive();
+      return true;
+    } catch (e) {
+      $("hm-status").textContent = e.message;
+      $("hm-status").classList.add("error");
+      return false;
+    }
+  }
+  $("hm-setup").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (await hangmanAction({ action: "start", word: $("hm-secret").value })) $("hm-secret").value = "";
+  });
+  $("hm-random").addEventListener("click", () => hangmanAction({ action: "random" }));
+  $("hm-reset").addEventListener("click", () => hangmanAction({ action: "reset" }));
+  setInterval(() => {
+    // Don't wipe a secret word that's being typed
+    if (!document.hidden && !$("hangman").hidden && !$("tab-sign").hidden && !$("hm-secret").value) loadHangman();
+  }, 1500);
 
   // ---- Pixel painter ----
   const W = 64, H = 32;
