@@ -21,6 +21,7 @@ from PIL import Image, ImageOps
 import web
 import ambient
 import drawing
+import blackjack
 
 # NECESSARY!!!!! VVVVV
 sys.path.append(os.path.abspath('/home/pi/rpi-rgb-led-matrix/bindings/python'))
@@ -139,7 +140,7 @@ NFL_TEAMS = [
 SETTINGS_FIELDS = [
     {"key": "display_mode", "section": "Mode", "label": "Display mode", "type": "choice",
      "options": [["normal", "Clock, weather & buses"], ["music", "Music only"], ["sports", "Football scores"],
-                 ["ambient", "Ambient"], ["drawing", "Drawing"], ["auto", "Auto"]]},
+                 ["ambient", "Ambient"], ["drawing", "Drawing"], ["blackjack", "Blackjack"], ["auto", "Auto"]]},
     {"key": "ambient_scene", "section": "Mode", "label": "Ambient scene", "type": "choice",
      "options": [["aquarium", "Aquarium"], ["fireplace", "Fireplace"], ["rain", "Rain on the window"]]},
     {"key": "day_brightness", "section": "Screen", "label": "Daytime brightness", "type": "range", "min": 1, "max": 100},
@@ -1784,10 +1785,20 @@ def show_drawing():
 
 painting = drawing.Drawing(os.path.join(APP_DIR, "drawings"), options.cols, options.rows, on_edit=show_drawing)
 
+
+def show_blackjack():
+    # Playing a hand from the control page puts the table on the sign
+    if settings["display_mode"] != "blackjack":
+        update_settings({"display_mode": "blackjack"})
+
+
+card_table = blackjack.Blackjack(os.path.join(APP_DIR, "blackjack.json"),
+                                 {"text": nfl_status_font, "tiny": bus_number_font}, on_play=show_blackjack)
+
 # Control page first, so it's up within seconds of a restart even if a data source is slow
 try:
     web.start_server(WEB_PORT, WEB_PIN, os.path.join(APP_DIR, "web", "index.html"),
-                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting)
+                     SETTINGS_FIELDS, get_settings, update_settings, matrix.screen_png, current_mode, painting, card_table)
     print(f"Control page running on port {WEB_PORT}{' (PIN required)' if WEB_PIN else ''}")
 except Exception as e:
     # The sign keeps working without the control page
@@ -1856,6 +1867,15 @@ try:
             offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
             time.sleep(NFL_TICKER_FRAME)
             cycle_start = 0.0  # start a fresh cycle if drawing mode ends
+            continue
+
+        # Blackjack mode: the hand being played from the control page
+        if mode == "blackjack":
+            offscreen_canvas.brightness = brightness
+            card_table.draw(offscreen_canvas, time.monotonic())
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            time.sleep(NFL_TICKER_FRAME)
+            cycle_start = 0.0  # start a fresh cycle if blackjack mode ends
             continue
 
         # Ambient mode: the aquarium, fireplace or rainy window, whichever scene is chosen

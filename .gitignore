@@ -15,3 +15,7 @@ settings.json.tmp
 
 # Pixel painter drawings saved from the control page
 drawings/
+
+# Blackjack chips
+blackjack.json
+blackjack.json.tmp

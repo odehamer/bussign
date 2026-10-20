@@ -1,5 +1,5 @@
 # Phone control page for the sign: serves web/index.html, the live screen, and a small JSON API for
-# settings and the pixel painter. It only knows about the callbacks main.py hands it, never the display.
+# settings, the pixel painter and blackjack. It only knows about the callbacks main.py hands it, never the display.
 import base64
 import binascii
 import hmac
@@ -13,7 +13,7 @@ MAX_DRAWING_BODY_BYTES = 64 * 1024  # a whole 64x32 drawing, or a long batch of 
 
 
 def start_server(port, pin, page_path, settings_fields, get_settings, update_settings, get_screen_png,
-                 get_active_mode, drawing):
+                 get_active_mode, drawing, blackjack):
     class Handler(BaseHTTPRequestHandler):
         server_version = "BusSign"
         sys_version = ""
@@ -73,6 +73,8 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                                      "image": base64.b64encode(drawing.get_bytes()).decode()})
             elif self.path == "/api/drawings":
                 self.send_json(200, {"drawings": drawing.list_saved()})
+            elif self.path == "/api/blackjack":
+                self.send_json(200, blackjack.state())
             elif saved:
                 body = drawing.saved_png(saved.group(1))
                 if body is None:
@@ -136,6 +138,13 @@ def start_server(port, pin, page_path, settings_fields, get_settings, update_set
                     return
                 drawing_id, error = drawing.save_snapshot()
                 return self.send_json(400, {"error": error}) if error else self.send_json(201, {"id": drawing_id})
+            if self.path == "/api/blackjack":
+                # {"action": "deal" | "hit" | "stand" | "double" | "rebuy"} or {"action": "bet", "amount": 50}
+                data = self.read_json()
+                if data is None:
+                    return
+                error = blackjack.act(data.get("action"), data.get("amount"))
+                return self.send_json(400, {"error": error}) if error else self.send_json(200, blackjack.state())
             if load:
                 if self.read_json() is None:
                     return

@@ -94,6 +94,25 @@
   .scene:has(input:checked) { border-color: var(--accent); background: #0f1d1f; color: var(--accent); }
   .scene:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  .bj-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .bj-header h2 { margin: 0; }
+  .bj-chips { font-size: 15px; color: var(--muted); }
+  .bj-chips strong { color: #ffbe00; }
+  .bj-hands { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 14px; font-size: 17px; }
+  .bj-hands dt { color: var(--muted); font-size: 14px; align-self: center; }
+  .bj-hands dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .bj-hands .red { color: #ff6b6b; }
+  .bj-bets { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 10px; }
+  .bj-bets button, .bj-play button, .bj-rebuy {
+    padding: 11px 4px; border-radius: 10px; border: 1px solid var(--panel-edge); background: #0f1115;
+    color: var(--text); font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .bj-bets button[aria-pressed="true"] { border-color: #ffbe00; color: #ffbe00; background: #1d1a0f; }
+  .bj-bets button:disabled, .bj-play button:disabled { opacity: 0.4; cursor: default; }
+  .bj-play { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .bj-play button { padding: 14px 4px; font-size: 17px; }
+  .bj-rebuy { width: 100%; margin-top: 10px; }
+
   .tabs {
     display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px;
     background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 12px;
@@ -202,6 +221,26 @@
         <canvas id="live" width="640" height="320" role="img" aria-label="Live view of the sign"></canvas>
       </section>
 
+      <section id="blackjack" hidden>
+        <div class="bj-header">
+          <h2>Blackjack</h2>
+          <span class="bj-chips">Chips <strong id="bj-chips"></strong></span>
+        </div>
+        <dl class="bj-hands">
+          <dt>Dealer</dt><dd id="bj-dealer">&mdash;</dd>
+          <dt>You</dt><dd id="bj-player">&mdash;</dd>
+        </dl>
+        <div class="bj-bets" id="bj-bets" role="group" aria-label="Bet size"></div>
+        <button class="primary" type="button" id="bj-deal">Deal</button>
+        <div class="bj-play" id="bj-play" hidden>
+          <button type="button" id="bj-hit">Hit</button>
+          <button type="button" id="bj-stand">Stand</button>
+          <button type="button" id="bj-double">Double</button>
+        </div>
+        <button type="button" class="bj-rebuy" id="bj-rebuy" hidden>Rebuy $1000</button>
+        <div class="status" id="bj-status" role="status" aria-live="polite"></div>
+      </section>
+
       <section>
         <h2 id="modes-heading">Mode</h2>
         <fieldset class="modes" id="modes" role="radiogroup" aria-labelledby="modes-heading">
@@ -229,6 +268,10 @@
           <label class="mode">
             <input type="radio" name="mode" value="drawing">
             <span><span class="mode-name">Drawing</span><span class="mode-desc">Your pixel art from the Draw tab</span></span>
+          </label>
+          <label class="mode">
+            <input type="radio" name="mode" value="blackjack">
+            <span><span class="mode-name">Blackjack</span><span class="mode-desc">Play against the dealer, with the controls above</span></span>
           </label>
           <label class="mode">
             <input type="radio" name="mode" value="auto">
@@ -327,12 +370,15 @@
   const sceneInputs = () => document.querySelectorAll('#scenes input[name="scene"]');
   let modeSaving = false;
 
-  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing" };
+  const MODE_NAMES = { normal: "Normal", music: "Music", sports: "Sports", ambient: "Ambient", drawing: "Drawing", blackjack: "Blackjack" };
 
   function showMode(mode, activeMode) {
     modeInputs().forEach((input) => { input.checked = input.value === mode; });
     // The scene choices only show while ambient mode is picked
     $("scenes").hidden = mode !== "ambient";
+    // Blackjack controls sit under the live view while blackjack mode is picked
+    $("blackjack").hidden = mode !== "blackjack";
+    if (mode === "blackjack") loadBlackjack();
     sceneInputs().forEach((input) => { input.checked = input.value === settingValues.ambient_scene; });
     // In auto, say which mode is on screen right now
     $("auto-now").textContent = mode === "auto" && MODE_NAMES[activeMode] ? `Showing ${MODE_NAMES[activeMode]} now` : "";
@@ -556,6 +602,79 @@
     updateLive();
   }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) updateLive(); });
+
+  // ---- Blackjack ----
+  const SUITS = { H: "\u2665", D: "\u2666", C: "\u2663", S: "\u2660" };
+  const RESULT_TEXT = { WIN: "You win", BLACKJACK: "Blackjack! You win", PUSH: "Push. Your bet comes back",
+                        LOSE: "Dealer wins", BUST: "Bust" };
+  let blackjackTimer = null;
+
+  function showHand(element, cards, total) {
+    element.textContent = "";
+    if (!cards.length) { element.textContent = "\u2014"; return; }
+    cards.forEach((card) => {
+      const span = document.createElement("span");
+      const suit = card.slice(-1);
+      span.textContent = card === "?" ? "?? " : card.slice(0, -1) + SUITS[suit] + " ";
+      if (suit === "H" || suit === "D") span.className = "red";
+      element.append(span);
+    });
+    element.append(`(${total})`);
+  }
+
+  function showBlackjack(game) {
+    $("bj-chips").textContent = `$${game.chips}`;
+    showHand($("bj-dealer"), game.dealer, game.dealer_total);
+    showHand($("bj-player"), game.player, game.player_total);
+    const betting = game.phase === "bet" || game.phase === "done";
+    $("bj-bets").textContent = "";
+    game.bets.forEach((amount) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `$${amount}`;
+      button.setAttribute("aria-pressed", String(amount === game.bet));
+      button.disabled = !betting || amount > game.chips;
+      button.addEventListener("click", () => blackjackAction("bet", amount));
+      $("bj-bets").append(button);
+    });
+    $("bj-deal").hidden = !betting || game.can_rebuy;
+    $("bj-deal").textContent = `${game.phase === "done" ? "Deal again" : "Deal"} ($${game.bet})`;
+    $("bj-play").hidden = game.phase !== "player";
+    $("bj-double").disabled = !game.can_double;
+    $("bj-rebuy").hidden = !game.can_rebuy;
+    let status = "Pick a bet and deal";
+    if (game.phase === "player") status = `Betting $${game.hand_bet}`;
+    if (game.phase === "dealer") status = "Dealer's turn\u2026";
+    if (game.phase === "done") {
+      const amount = game.payout ? ` (${game.payout > 0 ? "+" : "\u2212"}$${Math.abs(game.payout)})` : "";
+      status = RESULT_TEXT[game.result] + amount;
+    }
+    if (game.can_rebuy) status = "Out of chips";
+    $("bj-status").textContent = status;
+    $("bj-status").classList.remove("error");
+    // Follow the dealer's cards as they come out
+    clearTimeout(blackjackTimer);
+    if (game.phase === "dealer") blackjackTimer = setTimeout(loadBlackjack, 400);
+  }
+
+  async function loadBlackjack() {
+    try { showBlackjack(await api("GET", "/api/blackjack")); } catch (e) {}
+  }
+
+  async function blackjackAction(action, amount) {
+    try {
+      showBlackjack(await api("POST", "/api/blackjack", { action, amount }));
+      updateLive();
+    } catch (e) {
+      $("bj-status").textContent = e.message;
+      $("bj-status").classList.add("error");
+    }
+  }
+  $("bj-deal").addEventListener("click", () => blackjackAction("deal"));
+  $("bj-hit").addEventListener("click", () => blackjackAction("hit"));
+  $("bj-stand").addEventListener("click", () => blackjackAction("stand"));
+  $("bj-double").addEventListener("click", () => blackjackAction("double"));
+  $("bj-rebuy").addEventListener("click", () => blackjackAction("rebuy"));
 
   // ---- Pixel painter ----
   const W = 64, H = 32;
