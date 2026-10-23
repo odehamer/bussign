@@ -1,4 +1,5 @@
-# Ambient mode scenes: a crackling fireplace and rain running down a window at night (the aquarium
+# Ambient mode scenes: a crackling fireplace, rain running down a window at night and a spooky
+# Halloween night (the aquarium
 # lives in aquarium.py). Each scene draws onto any canvas with SetPixel/SetImage, like Aquarium.
 import math
 import random
@@ -275,9 +276,185 @@ class RainyWindow:
                 canvas.SetPixel(px, py + 1, 110, 125, 150)
 
 
+# ---------------- halloween ----------------
+HOUSE_ROWS = [  # haunted house on a hill; "#" wall, "w" window, "d" door, "." see-through
+    "........#.........",
+    ".......###........",
+    ".......###........",
+    "......#####.......",
+    "......#w#w#.......",
+    "......#####...#...",
+    "....#########.##..",
+    "...###########.#..",
+    "..#############...",
+    ".###############..",
+    "..#w##w###w##w#...",
+    "..#############...",
+    "..#w##w###w##w#...",
+    "..#############...",
+    "..######dd#####...",
+    "..######dd#####...",
+]
+PUMPKIN = [".gg..", "ooooo", "oyoyo", "ooooo", "oyyyo", ".ooo."]
+GHOST = [".###.", "#####", "#.#.#", "#####", "#####", "#.#.#"]
+BAT_UP = ["#...#", ".###."]
+BAT_DOWN = [".###.", "#...#"]
+
+
+class Halloween:
+    def __init__(self, seed=None):
+        self.rng = random.Random(seed)
+        self.background, self.windows = self._make_background()
+        self.base = self.background.tobytes()
+        self.stars = [(self.rng.randrange(64), self.rng.randrange(0, 14), self.rng.uniform(0, math.tau)) for _ in range(14)]
+        self.bats = [[self.rng.uniform(-20, 64), self.rng.uniform(3, 14), self.rng.uniform(7, 12), self.rng.uniform(0, math.tau)]
+                     for _ in range(3)]
+        self.window_lit = {w: self.rng.random() < 0.7 for w in self.windows}
+        self.next_window_change = 0.0
+        self.flash_at = None
+        self.next_flash = self.rng.uniform(25, 60)
+        self.last_t = None
+        self.fogged, self.fog_time = self.base, -1.0
+
+    def _fog(self, t):
+        # Low fog rolling along the ground; redrawn ten times a second since it moves slowly
+        buf = bytearray(self.base)
+        fog = (120, 110, 150)
+        for y in range(23, HEIGHT):
+            depth = 0.22 * (1 - (HEIGHT - 1 - y) / 9)
+            for x in range(WIDTH):
+                amount = depth * (0.5 + 0.5 * math.sin(x * 0.25 + t * 0.6 + y * 0.9) * math.sin(x * 0.11 - t * 0.4))
+                i = (y * WIDTH + x) * 3
+                buf[i] = int(buf[i] + (fog[0] - buf[i]) * amount)
+                buf[i + 1] = int(buf[i + 1] + (fog[1] - buf[i + 1]) * amount)
+                buf[i + 2] = int(buf[i + 2] + (fog[2] - buf[i + 2]) * amount)
+        return bytes(buf)
+
+    def _make_background(self):
+        image = Image.new("RGB", (WIDTH, HEIGHT))
+        for y in range(HEIGHT):
+            sky = blend((25, 6, 45), (85, 30, 70), y / (HEIGHT - 1))
+            for x in range(WIDTH):
+                image.putpixel((x, y), sky)
+        # Full moon with a soft glow
+        mx, my = 12, 8
+        for y in range(HEIGHT):
+            for x in range(WIDTH):
+                d = math.hypot(x - mx, y - my)
+                if d <= 5.2:
+                    crater = (x, y) in ((10, 6), (11, 7), (14, 10), (13, 5), (9, 10))
+                    image.putpixel((x, y), (232, 222, 178) if crater else (255, 245, 200))
+                elif d < 9:
+                    image.putpixel((x, y), blend(image.getpixel((x, y)), (140, 110, 120), (9 - d) / 9 * 0.6))
+        # Rolling hill along the bottom
+        ground = (12, 6, 18)
+        for x in range(WIDTH):
+            top = 26 - round(2.5 * math.sin((x + 6) / 64 * math.pi))
+            for y in range(top, HEIGHT):
+                image.putpixel((x, y), ground)
+        # Dead tree on the left
+        tree = [(4, y) for y in range(15, 27)] + [(5, y) for y in range(19, 27)]
+        tree += [(3, 16), (2, 15), (1, 14), (5, 17), (6, 16), (7, 15), (8, 15), (6, 13), (6, 14), (3, 12), (3, 13),
+                 (4, 14), (9, 14), (2, 18), (1, 18), (0, 17)]
+        for x, y in tree:
+            image.putpixel((x, y), ground)
+        # Haunted house on the right, with fence posts
+        left, top = 44, 11
+        windows = []
+        for dy, row in enumerate(HOUSE_ROWS):
+            for dx, key in enumerate(row):
+                if key == ".":
+                    continue
+                x, y = left + dx, top + dy
+                if key == "w":
+                    windows.append((x, y))
+                image.putpixel((x, y), (40, 25, 15) if key == "d" else ground)
+        for x in range(28, 44, 3):
+            for y in range(25, 28):
+                if y >= 26 or x % 2:
+                    image.putpixel((x, y), ground)
+        for x in range(28, 44):
+            image.putpixel((x, 26), ground)
+        return image, windows
+
+    def draw(self, canvas, t):
+        dt = 0.0 if self.last_t is None else min(0.2, t - self.last_t)
+        self.last_t = t
+        rng = self.rng
+        if t - self.fog_time >= 0.1:
+            self.fogged, self.fog_time = self._fog(t), t
+        buf = bytearray(self.fogged)
+
+        def put(x, y, color):
+            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+                i = (y * WIDTH + x) * 3
+                buf[i:i + 3] = bytes(color)
+
+        def mix(x, y, color, amount):
+            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+                i = (y * WIDTH + x) * 3
+                buf[i:i + 3] = bytes(round(buf[i + k] + (color[k] - buf[i + k]) * amount) for k in range(3))
+
+        # Lightning now and then: the sky lights up twice
+        if t >= self.next_flash:
+            self.flash_at, self.next_flash = t, t + rng.uniform(30, 75)
+        since = None if self.flash_at is None else t - self.flash_at
+        if since is not None and (since < 0.07 or 0.16 < since < 0.24):
+            for y in range(0, 22):
+                for x in range(WIDTH):
+                    mix(x, y, (200, 190, 230), 0.45)
+        # Twinkling stars (not over the moon)
+        for x, y, phase in self.stars:
+            if math.hypot(x - 12, y - 8) > 9:
+                level = 0.5 + 0.5 * math.sin(t * 2 + phase)
+                mix(x, y, (255, 255, 230), 0.25 + 0.5 * level)
+        # House windows flicker on and off
+        if t >= self.next_window_change:
+            window = rng.choice(self.windows)
+            self.window_lit[window] = not self.window_lit[window]
+            self.next_window_change = t + rng.uniform(1.5, 5)
+        for window, lit in self.window_lit.items():
+            if lit:
+                glow = 0.85 + 0.15 * math.sin(t * 9 + window[0])
+                put(*window, (int(255 * glow), int(190 * glow), 40))
+        # Jack-o'-lanterns, their faces flickering like candles
+        for px, py, phase in ((20, 24, 0.0), (30, 26, 2.1)):
+            flame = 0.65 + 0.35 * abs(math.sin(t * 7 + phase) * math.sin(t * 3.1 + phase))
+            colors = {"o": (230, 100, 0), "g": (40, 120, 20), "y": (255, int(150 + 90 * flame), int(40 * flame))}
+            for dy, row in enumerate(PUMPKIN):
+                for dx, key in enumerate(row):
+                    if key != ".":
+                        put(px + dx, py + dy, colors[key])
+        # Bats flapping across the sky
+        for bat in self.bats:
+            bat[0] += bat[2] * dt
+            if bat[0] > WIDTH + 6:
+                bat[0], bat[1], bat[2] = -6 - rng.uniform(0, 30), rng.uniform(3, 14), rng.uniform(7, 12)
+            y = bat[1] + math.sin(t * 2 + bat[3]) * 2
+            sprite = BAT_UP if int(t * 6 + bat[3]) % 2 else BAT_DOWN
+            for dy, row in enumerate(sprite):
+                for dx, key in enumerate(row):
+                    if key == "#":
+                        put(round(bat[0]) + dx, round(y) + dy, (0, 0, 0))
+        # A ghost drifting around the house, fading in and out
+        fade = max(0.0, math.sin(t * 0.35))
+        if fade > 0:
+            gx = 36 + math.sin(t * 0.23) * 8
+            gy = 14 + math.sin(t * 1.3) * 1.5
+            for dy, row in enumerate(GHOST):
+                for dx, key in enumerate(row):
+                    x, y = round(gx) + dx, round(gy) + dy
+                    if key == "#":
+                        mix(x, y, (230, 235, 255), 0.85 * fade)
+                    elif dy == 2:
+                        mix(x, y, (10, 10, 30), 0.85 * fade)  # eyes
+        canvas.SetImage(Image.frombytes("RGB", (WIDTH, HEIGHT), bytes(buf)), 0, 0)
+
+
 # The choices for ambient mode, in the order the control page shows them
 SCENES = {
     "aquarium": aquarium.Aquarium,
     "fireplace": Fireplace,
     "rain": RainyWindow,
+    "halloween": Halloween,
 }
